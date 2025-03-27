@@ -1,0 +1,33 @@
+# Project structure
+data-analysis-gui/
+├── backend/
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── main.py             # FastAPI application
+│   │   ├── routers/
+│   │   │   ├── __init__.py
+│   │   │   └── data_operations.py  # API routes for data operations
+│   │   └── services/
+│   │       ├── __init__.py
+│   │       ├── pandas_service.py   # Pandas implementation
+│   │       ├── polars_service.py   # Polars implementation
+│   │       └── sql_service.py      # SQL/DuckDB implementation
+│   ├── requirements.txt        # Python dependencies
+│   └── README.md               # Backend setup instructions
+└── frontend/
+    ├── public/
+    │   └── index.html          # HTML template
+    ├── src/
+    │   ├── components/
+    │   │   ├── DataTable.jsx   # Table to display data
+    │   │   ├── NavBar.jsx      # Navigation/controls
+    │   │   ├── OperationsPanel.jsx # Panel for data operations
+    │   │   ├── CodeDisplay.jsx # Display generated code
+    │   │   └── Visualizations/ # Visualization components
+    │   ├── services/
+    │   │   └── api.js          # API client
+    │   ├── App.jsx             # Main application component
+    │   ├── index.jsx           # Entry point
+    │   └── styles/             # CSS/Tailwind styles
+    ├── package.json            # Node dependencies
+    └── README.md               # Frontend setup instructions
