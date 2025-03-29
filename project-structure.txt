@@ -31,3 +31,26 @@ data-analysis-gui/
     │   └── styles/             # CSS/Tailwind styles
     ├── package.json            # Node dependencies
     └── README.md               # Frontend setup instructions
+
+    data-analysis-gui/
+├── backend/
+│   ├── app/
+│   │   └── main.py
+│   └── requirements.txt
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── DataTable.jsx
+│   │   │   ├── NavBar.jsx
+│   │   │   ├── OperationsPanel.jsx
+│   │   │   └── CodeDisplay.jsx
+│   │   ├── services/
+│   │   │   └── api.js
+│   │   ├── styles/
+│   │   │   └── index.css
+│   │   ├── App.jsx
+│   │   └── index.jsx
+│   ├── package.json
+│   └── tailwind.config.js
+└──
