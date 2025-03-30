@@ -1,5 +1,3 @@
-// Replace your existing api.js with this improved version
-
 import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
@@ -284,7 +282,7 @@ export const resetTransformation = async (datasetName, currentEngine = 'pandas')
   }
 };
 
-export default {
+const apiService = {
   testConnection,
   uploadDataset,
   getDatasets,
@@ -301,3 +299,5 @@ export default {
   undoTransformation,
   resetTransformation,
 };
+
+export default apiService;

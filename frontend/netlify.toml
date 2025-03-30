@@ -1,0 +1,7 @@
+[build]
+  base = "frontend"
+  publish = "build"
+  command = "CI='' npm run build"  # This disables treating warnings as errors
+
+[build.environment]
+  REACT_APP_API_URL = "https://datamaid.onrender.com"  # Replace with your actual backend URL
