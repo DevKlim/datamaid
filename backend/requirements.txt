@@ -40,5 +40,6 @@ numpy>=1.24.0,<2.0.0 # Pandas dependency, pin lower than 2.0 for broader compat
 typing-extensions>=4.6.0 # Often needed by pydantic/fastapi
 
 # Optional but recommended:
+gunicorn
 python-dotenv # For managing environment variables if needed later
 loguru # For better logging if needed later
