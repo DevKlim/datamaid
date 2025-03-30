@@ -87,74 +87,77 @@ export const getDatasets = async () => {
   }
 };
 
-export const getDataset = async (datasetName, engine = 'pandas', limit = 10) => {
+export const getDataset = async (datasetName, engine = 'pandas', limit = 100, offset = 0) => {
   try {
-    const response = await api.get(`/dataset/${datasetName}?engine=${engine}&limit=${limit}`);
+    // Use the renamed backend endpoint
+    const response = await api.get(`/dataset/${datasetName}?engine=${engine}&limit=${limit}&offset=${offset}`);
+    // Expecting { data, columns, row_count, can_undo, can_reset, last_code }
     return response.data;
   } catch (error) {
-    console.error(`Error fetching dataset ${datasetName}:`, error);
+    console.error(`Error fetching dataset ${datasetName}:`, error.response?.data || error.message);
     throw error;
   }
 };
 
+
 export const loadMoreRows = async (datasetName, engine = 'pandas', offset = 0, limit = 50) => {
   try {
+    // This endpoint might not need the flags, but uses get_dataset_preview logic now
     const response = await api.get(`/dataset/${datasetName}?engine=${engine}&offset=${offset}&limit=${limit}`);
-    return response.data;
+    // Return only data for appending
+    return { data: response.data.data };
   } catch (error) {
-    console.error(`Error loading more rows for ${datasetName}:`, error);
+    console.error(`Error loading more rows for ${datasetName}:`, error.response?.data || error.message);
     throw error;
   }
 };
 
 export const performOperation = async (datasetName, operation, params, engine = 'pandas') => {
-  // Create form data for the request
   const formData = new FormData();
   formData.append('dataset_name', datasetName);
   formData.append('operation', operation);
-  
-  // Ensure params is properly stringified and check for any empty values
-  // This helps prevent malformed JSON
   const sanitizedParams = {};
   Object.keys(params).forEach(key => {
-    // Skip empty arrays or undefined values
     if (params[key] === undefined) return;
     if (Array.isArray(params[key]) && params[key].length === 0) return;
     sanitizedParams[key] = params[key];
   });
-  
   formData.append('params', JSON.stringify(sanitizedParams));
   formData.append('engine', engine);
-  
-  // Add some debugging logs
-  console.log('Operation Request:', {
-    dataset: datasetName,
-    operation,
-    params: sanitizedParams,
-    engine
-  });
-  
+
+  console.log('Operation Request:', { dataset: datasetName, operation, params: sanitizedParams, engine });
+  formData.forEach((value, key) => { console.log(`${key}:`, value); });
+
   try {
-    const response = await api.post('/operation', formData);
+    const response = await api.post('/operation', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     console.log('Operation Response:', response.data);
+    // Expecting { data, columns, row_count, code, can_undo, can_reset }
     return response.data;
   } catch (error) {
     console.error('Operation Error:', error.response?.data || error.message);
+    console.error('FastAPI Validation Detail:', error.response?.data?.detail);
     throw error;
   }
 };
+
 
 export const executeCustomCode = async (datasetName, code, engine = 'pandas') => {
   const formData = new FormData();
   formData.append('dataset_name', datasetName);
   formData.append('code', code);
   formData.append('engine', engine);
-  
+
   try {
-    const response = await api.post('/execute-code', formData);
+    const response = await api.post('/execute-code', formData, {
+       headers: { 'Content-Type': 'multipart/form-data' }, // Add header here too!
+    });
+     // Expecting { data, columns, row_count, code, can_undo, can_reset }
     return response.data;
   } catch (error) {
-    console.error(`Error executing custom code on ${datasetName}:`, error);
+    console.error(`Error executing custom code on ${datasetName}:`, error.response?.data || error.message);
+     console.error('FastAPI Validation Detail:', error.response?.data?.detail);
     throw error;
   }
 };
@@ -184,12 +187,15 @@ export const saveTransformation = async (datasetName, newDatasetName, engine = '
   formData.append('dataset_name', datasetName);
   formData.append('new_dataset_name', newDatasetName);
   formData.append('engine', engine);
-  
+
   try {
-    const response = await api.post('/save-transformation', formData);
+    const response = await api.post('/save-transformation', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }, // Add header
+    });
     return response.data;
   } catch (error) {
-    console.error(`Error saving transformation of ${datasetName} as ${newDatasetName}:`, error);
+    console.error(`Error saving transformation of ${datasetName} as ${newDatasetName}:`, error.response?.data || error.message);
+     console.error('FastAPI Validation Detail:', error.response?.data?.detail);
     throw error;
   }
 };
@@ -222,15 +228,20 @@ export const mergeDatasets = async (leftDataset, rightDataset, params, engine = 
   formData.append('right_dataset', rightDataset);
   formData.append('params', JSON.stringify(params));
   formData.append('engine', engine);
-  
+
   try {
-    const response = await api.post('/merge-datasets', formData);
+    const response = await api.post('/merge-datasets', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }, // Add header
+    });
+     // Expecting { message, data, columns, row_count, code, can_undo, can_reset }
     return response.data;
   } catch (error) {
-    console.error(`Error merging datasets ${leftDataset} and ${rightDataset}:`, error);
+    console.error(`Error merging datasets ${leftDataset} and ${rightDataset}:`, error.response?.data || error.message);
+     console.error('FastAPI Validation Detail:', error.response?.data?.detail);
     throw error;
   }
 };
+
 
 // New function for regex-based operations
 export const performRegexOperation = async (datasetName, operation, regex, options, engine = 'pandas') => {
@@ -250,6 +261,29 @@ export const performRegexOperation = async (datasetName, operation, regex, optio
   }
 };
 
+export const undoTransformation = async (datasetName, currentEngine = 'pandas') => {
+  try {
+    // Send current engine preference for the preview response
+    const response = await api.post(`/undo/${datasetName}?engine=${currentEngine}`);
+     // Expecting { message, data, columns, row_count, can_undo, can_reset, last_code }
+    return response.data;
+  } catch (error) {
+    console.error(`Error undoing operation on ${datasetName}:`, error.response?.data || error.message);
+    throw error;
+  }
+};
+
+export const resetTransformation = async (datasetName, currentEngine = 'pandas') => {
+  try {
+    const response = await api.post(`/reset/${datasetName}?engine=${currentEngine}`);
+     // Expecting { message, data, columns, row_count, can_undo, can_reset, last_code }
+    return response.data;
+  } catch (error) {
+    console.error(`Error resetting transformations for ${datasetName}:`, error.response?.data || error.message);
+    throw error;
+  }
+};
+
 export default {
   testConnection,
   uploadDataset,
@@ -264,4 +298,6 @@ export default {
   exportDataset,
   mergeDatasets,
   performRegexOperation,
+  undoTransformation,
+  resetTransformation,
 };

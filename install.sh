@@ -2,299 +2,164 @@
 # Cross-platform installation script for Data Analysis GUI
 # Works on macOS, Linux, and Windows (with Git Bash or WSL)
 
-# Terminal colors for better readability
+# Terminal colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Print banner
 echo -e "${BLUE}=============================================${NC}"
 echo -e "${BLUE}  Data Analysis GUI - Installation Script    ${NC}"
 echo -e "${BLUE}=============================================${NC}"
 
-# Detect operating system
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="macOS"
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    OS="Linux"
-elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-    OS="Windows"
-else
-    OS="Unknown"
-fi
-
-echo -e "${YELLOW}Detected operating system: ${OS}${NC}"
+# --- Prerequisite Checks ---
+echo -e "\n${YELLOW}Checking prerequisites...${NC}"
 
 # Function to check if a command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Check if we're running with admin/sudo privileges on Windows
-if [[ "$OS" == "Windows" ]]; then
-    # Check if running as Administrator (Windows)
-    if [[ "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        echo -e "${YELLOW}Note: On Windows, you may need to run this script as Administrator${NC}"
-        echo -e "${YELLOW}or use Git Bash with appropriate permissions for virtual environment creation.${NC}"
-        echo -e "${YELLOW}Press Enter to continue or Ctrl+C to abort...${NC}"
-        read -r
-    fi
-fi
-
-# Check Python installation
-echo -e "\n${YELLOW}Checking Python installation...${NC}"
+# Check Python
 if command_exists python3; then
     PYTHON_CMD="python3"
 elif command_exists python; then
     PYTHON_CMD="python"
-    # Check if this is Python 3
-    PY_VERSION=$($PYTHON_CMD --version 2>&1)
-    if [[ ! $PY_VERSION == *"Python 3"* ]]; then
-        echo -e "${RED}Error: Python 3 is required but found ${PY_VERSION}${NC}"
-        exit 1
-    fi
 else
-    echo -e "${RED}Error: Python is not installed. Please install Python 3.9+ first.${NC}"
+    echo -e "${RED}Error: Python 3 is not installed or not in PATH.${NC}"
+    echo -e "${YELLOW}Please install Python 3.8+ and ensure it's added to your system PATH.${NC}"
     exit 1
 fi
+PY_VERSION=$($PYTHON_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo -e "${GREEN}✓ Found Python $($PYTHON_CMD --version)${NC}"
+# Basic version check (e.g., >= 3.8) - adapt if specific features need higher
+if [[ "$(printf '%s\n' "3.8" "$PY_VERSION" | sort -V | head -n1)" != "3.8" ]]; then
+     echo -e "${RED}Error: Python 3.8 or higher is required. Found ${PY_VERSION}.${NC}"
+     exit 1
+fi
 
-PYTHON_VERSION=$($PYTHON_CMD --version)
-echo -e "${GREEN}✓ Found ${PYTHON_VERSION}${NC}"
-
-# Check Node.js installation
-echo -e "\n${YELLOW}Checking Node.js installation...${NC}"
+# Check Node.js
 if ! command_exists node; then
-    echo -e "${RED}Error: Node.js is not installed. Please install Node.js 18+ first.${NC}"
+    echo -e "${RED}Error: Node.js is not installed or not in PATH.${NC}"
+    echo -e "${YELLOW}Please install Node.js (LTS version recommended, e.g., 18+) and ensure it's added to your system PATH.${NC}"
     exit 1
 fi
-
 NODE_VERSION=$(node --version)
 echo -e "${GREEN}✓ Found Node.js ${NODE_VERSION}${NC}"
 
-# Check npm installation
-echo -e "\n${YELLOW}Checking npm installation...${NC}"
+# Check npm
 if ! command_exists npm; then
-    echo -e "${RED}Error: npm is not installed. Please install npm first.${NC}"
+    echo -e "${RED}Error: npm is not installed or not in PATH.${NC}"
+    echo -e "${YELLOW}npm usually comes with Node.js. Please check your Node.js installation.${NC}"
     exit 1
 fi
-
 NPM_VERSION=$(npm --version)
 echo -e "${GREEN}✓ Found npm ${NPM_VERSION}${NC}"
+echo -e "${GREEN}✓ Prerequisites met.${NC}"
 
-# Create project directories
-echo -e "\n${YELLOW}Creating project directories...${NC}"
-mkdir -p backend/app
+# --- Create Project Structure ---
+echo -e "\n${YELLOW}Ensuring project directories exist...${NC}"
+mkdir -p backend/app/services
+mkdir -p frontend/public
 mkdir -p frontend/src/components
 mkdir -p frontend/src/services
 mkdir -p frontend/src/styles
-mkdir -p frontend/public
+echo -e "${GREEN}✓ Project directories checked/created.${NC}"
 
-# Set up backend
+# --- Backend Setup ---
 echo -e "\n${YELLOW}Setting up backend...${NC}"
-cd backend || { echo -e "${RED}Error: Failed to navigate to backend directory${NC}"; exit 1; }
+cd backend || { echo -e "${RED}Error: Failed to navigate to backend directory.${NC}"; exit 1; }
 
-# Check if virtual environment already exists
-VENV_EXISTS=false
-if [[ "$OS" == "Windows" ]]; then
-    if [ -d "venv" ] && [ -f "venv/Scripts/activate" ]; then
-        VENV_EXISTS=true
+# Create/Check Virtual Environment
+VENV_DIR="venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo -e "${YELLOW}Creating Python virtual environment ('$VENV_DIR')...${NC}"
+    if ! $PYTHON_CMD -m venv "$VENV_DIR"; then
+        echo -e "${RED}Error: Failed to create Python virtual environment.${NC}"
+        echo -e "${YELLOW}Make sure you have the necessary permissions and the 'venv' module is available.${NC}"
+        exit 1
     fi
+    echo -e "${GREEN}✓ Virtual environment created.${NC}"
 else
-    if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
-        VENV_EXISTS=true
-    fi
+    echo -e "${GREEN}✓ Virtual environment '$VENV_DIR' already exists.${NC}"
 fi
 
-# Create Python virtual environment if it doesn't exist
-if [ "$VENV_EXISTS" = true ]; then
-    echo -e "${GREEN}✓ Virtual environment already exists. Checking packages...${NC}"
-else
-    echo -e "${YELLOW}Creating Python virtual environment...${NC}"
-    
-    # Try to create the venv, capturing any errors
-    if ! $PYTHON_CMD -m venv venv 2>/tmp/venv_error.log; then
-        echo -e "${RED}Error creating virtual environment:${NC}"
-        cat /tmp/venv_error.log
-        
-        if [[ "$OS" == "Windows" ]]; then
-            echo -e "${YELLOW}On Windows, you might need to:${NC}"
-            echo -e "  1. Run this script as Administrator"
-            echo -e "  2. Ensure Python has permission to create directories here"
-            echo -e "  3. Try running: python -m pip install --upgrade virtualenv"
-        else
-            echo -e "${YELLOW}Try running: $PYTHON_CMD -m pip install --upgrade virtualenv${NC}"
-        fi
-        
-        echo -e "${YELLOW}Do you want to continue without creating a virtual environment? (y/n)${NC}"
-        read -r response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
+# Activate and Install Dependencies
+echo -e "${YELLOW}Installing backend dependencies from requirements.txt...${NC}"
+# Activate based on OS
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then # Git Bash on Windows
+    source "$VENV_DIR/Scripts/activate"
+elif [[ "$OSTYPE" == "win32" || "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then # Other Windows (might need cmd activation if run outside bash)
+     echo -e "${YELLOW}Note: On Windows CMD/PowerShell, activate manually: .\\${VENV_DIR}\\Scripts\\activate${NC}"
+     # Attempt Git Bash style activation anyway, might work
+     source "$VENV_DIR/Scripts/activate" || echo -e "${YELLOW}Activation might require manual step.${NC}"
+else # Linux/macOS
+    source "$VENV_DIR/bin/activate"
 fi
 
-# Set activation command based on OS
-if [[ "$OS" == "Windows" ]]; then
-    ACTIVATE_CMD="venv\\Scripts\\activate"
-    # For Git Bash on Windows
-    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-        ACTIVATE_CMD="source venv/Scripts/activate"
+# Upgrade pip first
+python -m pip install --upgrade pip
+# Install from requirements file
+if [ -f "requirements.txt" ]; then
+    python -m pip install -r requirements.txt
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error: Failed to install backend dependencies.${NC}"
+        # Deactivate on error before exiting
+        deactivate > /dev/null 2>&1 || true
+        exit 1
     fi
 else
-    ACTIVATE_CMD="source venv/bin/activate"
+    echo -e "${RED}Error: backend/requirements.txt not found!${NC}"
+    deactivate > /dev/null 2>&1 || true
+    exit 1
 fi
 
-# Activate virtual environment and install dependencies
-echo -e "${YELLOW}Installing backend dependencies...${NC}"
+# Deactivate environment (optional, good practice in scripts)
+deactivate > /dev/null 2>&1 || true
 
-# Function to check if a package is installed in the venv
-check_package_installed() {
-    local package="$1"
-    if [[ "$OS" == "Windows" && "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        cmd //c "$ACTIVATE_CMD && pip show $package > nul 2>&1"
-        return $?
-    else
-        eval "$ACTIVATE_CMD"
-        pip show "$package" > /dev/null 2>&1
-        local result=$?
-        deactivate
-        return $result
-    fi
-}
+echo -e "${GREEN}✓ Backend setup complete.${NC}"
+cd .. || exit 1 # Go back to root
 
-# Function to install Python dependencies with specific versions
-install_python_dependencies() {
-    echo -e "${YELLOW}Installing specific package versions to ensure compatibility...${NC}"
-    
-    # First, upgrade pip
-    if [[ "$OS" == "Windows" && "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        cmd //c "$ACTIVATE_CMD && python -m pip install --upgrade pip"
-    else
-        eval "$ACTIVATE_CMD"
-        python -m pip install --upgrade pip
-        deactivate
-    fi
-    
-    # Install packages with specific versions
-    if [[ "$OS" == "Windows" && "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        # For cmd.exe on Windows
-        cmd //c "$ACTIVATE_CMD && pip install fastapi==0.95.2 uvicorn==0.22.0 python-multipart==0.0.6 pandas==2.0.2 polars==0.18.9 duckdb==0.8.1 pydantic==1.10.8 typing_extensions==4.6.3 numpy==1.24.3 && pip freeze > requirements.txt"
-    else
-        # For macOS, Linux, Git Bash, WSL
-        eval "$ACTIVATE_CMD"
-        pip install fastapi==0.95.2 uvicorn==0.22.0 python-multipart==0.0.6 pandas==2.0.2 polars==0.18.9 duckdb==0.8.1 pydantic==1.10.8 typing_extensions==4.6.3 numpy==1.24.3
-        pip freeze > requirements.txt
-        deactivate
-    fi
-}
-
-# Install packages if needed or if we need to fix the pydantic issue
-if check_package_installed "fastapi" && check_package_installed "pandas" && check_package_installed "polars"; then
-    echo -e "${GREEN}✓ Key backend packages already installed${NC}"
-    
-    # Check specifically for pydantic_core issues
-    if [[ "$OS" == "Windows" && "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        cmd //c "$ACTIVATE_CMD && python -c \"import pydantic_core\" > nul 2>&1"
-        if [ $? -ne 0 ]; then
-            echo -e "${YELLOW}Issue with pydantic_core detected. Reinstalling pydantic...${NC}"
-            install_python_dependencies
-        fi
-    else
-        eval "$ACTIVATE_CMD"
-        python -c "import pydantic_core" > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            echo -e "${YELLOW}Issue with pydantic_core detected. Reinstalling pydantic...${NC}"
-            deactivate
-            install_python_dependencies
-        else
-            deactivate
-        fi
-    fi
-else
-    install_python_dependencies
-fi
-
-echo -e "${GREEN}✓ Backend setup complete!${NC}"
-
-# Return to project root
-cd ..
-
-# Set up frontend
+# --- Frontend Setup ---
 echo -e "\n${YELLOW}Setting up frontend...${NC}"
-cd frontend || { echo -e "${RED}Error: Failed to navigate to frontend directory${NC}"; exit 1; }
+cd frontend || { echo -e "${RED}Error: Failed to navigate to frontend directory.${NC}"; exit 1; }
 
-# Create or update package.json
-if [ -f "package.json" ]; then
-    echo -e "${GREEN}✓ package.json exists, updating dependencies...${NC}"
-else
-    echo -e "${YELLOW}Creating package.json...${NC}"
-    npm init -y
-fi
-
-# Add .babelrc file to fix babel preset issues
-echo -e "${YELLOW}Creating .babelrc file...${NC}"
-cat > .babelrc << EOF
+# Check/Create Config Files
+# .babelrc (optional if react-scripts handles it, but good for explicit config)
+if [ ! -f ".babelrc" ]; then
+  echo -e "${YELLOW}Creating .babelrc...${NC}"
+  cat > .babelrc << EOF
 {
   "presets": [
     "@babel/preset-env",
-    "@babel/preset-react"
+    ["@babel/preset-react", { "runtime": "automatic" }]
   ]
 }
 EOF
+fi
 
-# Create postcss.config.js with proper configuration
-echo -e "${YELLOW}Creating postcss.config.js...${NC}"
-cat > postcss.config.js << EOF
+# postcss.config.js
+if [ ! -f "postcss.config.js" ]; then
+  echo -e "${YELLOW}Creating postcss.config.js...${NC}"
+  cat > postcss.config.js << EOF
 module.exports = {
   plugins: {
-    'tailwindcss': {},
-    'autoprefixer': {},
+    tailwindcss: {},
+    autoprefixer: {},
   }
 }
 EOF
+fi
 
-# Installing frontend dependencies with specific versions to avoid compatibility issues
-echo -e "${YELLOW}Installing frontend dependencies...${NC}"
-npm install --legacy-peer-deps \
-    react@18.2.0 \
-    react-dom@18.2.0 \
-    react-scripts@5.0.1 \
-    @headlessui/react@1.7.17 \
-    @heroicons/react@2.0.18 \
-    axios@1.6.0 \
-    chart.js@4.4.0 \
-    react-chartjs-2@5.2.0 \
-    react-syntax-highlighter@15.5.0 \
-    @babel/core@7.23.3 \
-    @babel/preset-env@7.23.3 \
-    @babel/preset-react@7.23.3 
-
-# Install dev dependencies separately
-echo -e "${YELLOW}Installing frontend dev dependencies...${NC}"
-npm install --legacy-peer-deps --save-dev \
-    tailwindcss@3.3.5 \
-    postcss@8.4.31 \
-    autoprefixer@10.4.16 \
-    ajv@8.12.0
-
-# Fix potential ajv dependency issues by installing specific version of ajv-keywords
-echo -e "${YELLOW}Fixing ajv dependencies...${NC}"
-npm install --legacy-peer-deps --save-dev ajv-keywords@5.1.0
-
-# Clean npm cache and run npm rebuild to fix potential binary issues
-echo -e "${YELLOW}Cleaning npm cache and rebuilding dependencies...${NC}"
-npm cache clean --force
-npm rebuild
-
-# Initialize tailwind with a specific configuration
-echo -e "${YELLOW}Initializing Tailwind CSS...${NC}"
-cat > tailwind.config.js << EOF
+# tailwind.config.js
+if [ ! -f "tailwind.config.js" ]; then
+  echo -e "${YELLOW}Creating tailwind.config.js...${NC}"
+  cat > tailwind.config.js << EOF
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [
-    "./src/**/*.{js,jsx,ts,tsx}",
+    "./src/**/*.{js,jsx,ts,tsx}", // Ensure this covers your component files
     "./public/index.html"
   ],
   theme: {
@@ -303,12 +168,18 @@ module.exports = {
   plugins: [],
 }
 EOF
+fi
 
-# Create or ensure index.css exists with proper tailwind directives
-if [ ! -f "src/styles/index.css" ]; then
-    echo -e "${YELLOW}Creating index.css...${NC}"
+# src/styles/index.css (ensure Tailwind directives)
+INDEX_CSS="src/styles/index.css"
+if [ ! -f "$INDEX_CSS" ]; then
+    echo -e "${YELLOW}Creating $INDEX_CSS...${NC}"
     mkdir -p src/styles
-    cat > src/styles/index.css << EOF
+fi
+# Ensure Tailwind directives are present
+if ! grep -q "@tailwind base;" "$INDEX_CSS"; then
+    echo -e "${YELLOW}Adding Tailwind directives to $INDEX_CSS...${NC}"
+    cat > "$INDEX_CSS" << EOF
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -329,156 +200,239 @@ code {
 EOF
 fi
 
-echo -e "${GREEN}✓ Frontend setup complete!${NC}"
+# Install Frontend Dependencies
+if [ -f "package.json" ]; then
+    echo -e "${YELLOW}Installing frontend dependencies from package.json...${NC}"
+    # Use --legacy-peer-deps if needed, but try without first
+    npm install
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}npm install failed. Trying with --legacy-peer-deps...${NC}"
+        npm install --legacy-peer-deps
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Error: Failed to install frontend dependencies even with --legacy-peer-deps.${NC}"
+            echo -e "${YELLOW}Check package.json, network connection, and npm logs.${NC}"
+            exit 1
+        fi
+    fi
+else
+    echo -e "${RED}Error: frontend/package.json not found!${NC}"
+    exit 1
+fi
 
-# Return to project root
-cd ..
+echo -e "${GREEN}✓ Frontend setup complete.${NC}"
+cd .. || exit 1 # Go back to root
 
-# Create start script for each platform
-echo -e "\n${YELLOW}Creating startup scripts...${NC}"
+# --- Create Startup Scripts ---
+echo -e "\n${YELLOW}Creating startup scripts (start.sh, start.bat)...${NC}"
 
-# Create cross-platform start script
-cat > start.sh << EOF
+# Create start.sh (macOS/Linux/Git Bash)
+cat > start.sh << 'EOF'
 #!/bin/bash
 # Cross-platform startup script for Data Analysis GUI
 
-# Terminal colors for better readability
+# Terminal colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo -e "\${BLUE}=============================================${NC}"
-echo -e "\${BLUE}  Starting Data Analysis GUI               ${NC}"
-echo -e "\${BLUE}=============================================${NC}"
+echo -e "${BLUE}=============================================${NC}"
+echo -e "${BLUE}  Starting Data Analysis GUI               ${NC}"
+echo -e "${BLUE}=============================================${NC}"
 
-# Detect operating system
-if [[ "\$OSTYPE" == "darwin"* ]]; then
-    OS="macOS"
-elif [[ "\$OSTYPE" == "linux-gnu"* ]]; then
-    OS="Linux"
-elif [[ "\$OSTYPE" == "msys" || "\$OSTYPE" == "cygwin" || "\$OSTYPE" == "win32" ]]; then
-    OS="Windows"
-else
-    OS="Unknown"
-fi
+# Function to clean up background processes on exit
+cleanup() {
+    echo -e "\n${YELLOW}Shutting down servers...${NC}"
+    # Kill processes using their PIDs
+    if [ -n "$BACKEND_PID" ]; then
+        kill "$BACKEND_PID" > /dev/null 2>&1
+        wait "$BACKEND_PID" > /dev/null 2>&1 # Wait for it to actually terminate
+    fi
+     if [ -n "$FRONTEND_PID" ]; then
+        # npm start often spawns child processes, try killing the group
+        kill -TERM -- "-$FRONTEND_PID" > /dev/null 2>&1 || kill "$FRONTEND_PID" > /dev/null 2>&1
+        wait "$FRONTEND_PID" > /dev/null 2>&1
+    fi
+    echo -e "${GREEN}Servers stopped.${NC}"
+    exit 0
+}
 
-echo -e "\${YELLOW}Detected operating system: \${OS}${NC}"
+# Trap SIGINT (Ctrl+C) and SIGTERM to run cleanup
+trap cleanup SIGINT SIGTERM
 
 # Start backend server
-echo -e "\${YELLOW}Starting backend server...${NC}"
-cd backend || { echo -e "\${RED}Error: Failed to navigate to backend directory${NC}"; exit 1; }
+echo -e "${YELLOW}Starting backend server...${NC}"
+cd backend || { echo -e "${RED}Error: Failed to navigate to backend directory${NC}"; exit 1; }
 
-# Activate virtual environment and start server
-if [[ "\$OS" == "Windows" && "\$OSTYPE" != "msys" && "\$OSTYPE" != "cygwin" ]]; then
-    # For Windows (non-Bash shell)
-    start cmd /k "cd app && ..\\venv\\Scripts\\activate && uvicorn main:app --reload"
-else
-    # For macOS, Linux, Git Bash, WSL
-    cd app
-    # Run in the background and capture the process ID
-    source ../venv/bin/activate && uvicorn main:app --reload &
-    BACKEND_PID=\$!
-    cd ..
+# Activate venv and run uvicorn *from the backend directory*
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then # Git Bash/WSL/etc.
+    source venv/Scripts/activate
+else # Linux/macOS
+    source venv/bin/activate
+fi
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Error: Failed to activate backend virtual environment.${NC}"
+    exit 1
 fi
 
-# Return to project root
-cd ..
+# Start Uvicorn in the background
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+BACKEND_PID=$!
+echo -e "${GREEN}✓ Backend server starting (PID: $BACKEND_PID) on port 8000...${NC}"
+# Deactivate after starting (uvicorn runs in its own process)
+deactivate > /dev/null 2>&1 || true
+cd .. || exit 1 # Back to root
 
-# Wait for backend to start
-echo -e "\${YELLOW}Waiting for backend to initialize (5 seconds)...${NC}"
+# Wait a few seconds for backend
+echo -e "${YELLOW}Waiting for backend (5s)...${NC}"
 sleep 5
 
 # Start frontend server
-echo -e "\${YELLOW}Starting frontend server...${NC}"
-cd frontend || { echo -e "\${RED}Error: Failed to navigate to frontend directory${NC}"; exit 1; }
+echo -e "${YELLOW}Starting frontend server...${NC}"
+cd frontend || { echo -e "${RED}Error: Failed to navigate to frontend directory${NC}"; exit 1; }
 
-if [[ "\$OS" == "Windows" && "\$OSTYPE" != "msys" && "\$OSTYPE" != "cygwin" ]]; then
-    # For Windows (non-Bash shell)
-    start cmd /k "npm start"
-else
-    # For macOS, Linux, Git Bash, WSL
-    npm start &
-    FRONTEND_PID=\$!
-fi
+# Start React app in the background (setsid ensures child processes are grouped)
+setsid npm start &
+FRONTEND_PID=$!
+echo -e "${GREEN}✓ Frontend server starting (PID: $FRONTEND_PID) on port 3000...${NC}"
+cd .. || exit 1 # Back to root
 
-# Return to project root
-cd ..
-
-# Open browser after a short delay
-echo -e "\${YELLOW}Opening browser in 5 seconds...${NC}"
+# Wait a few seconds for frontend
+echo -e "${YELLOW}Waiting for frontend (5s)...${NC}"
 sleep 5
 
-if [[ "\$OS" == "Windows" && "\$OSTYPE" != "msys" && "\$OSTYPE" != "cygwin" ]]; then
-    # For Windows (non-Bash shell)
-    start http://localhost:3000
-elif [[ "\$OS" == "macOS" ]]; then
-    # For macOS
-    open http://localhost:3000
-else
-    # For Linux
-    xdg-open http://localhost:3000 2>/dev/null || sensible-browser http://localhost:3000 2>/dev/null || open http://localhost:3000 2>/dev/null || echo -e "\${YELLOW}Please open http://localhost:3000 in your browser${NC}"
+# Open browser
+URL="http://localhost:3000"
+echo -e "${YELLOW}Attempting to open $URL in your browser...${NC}"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    open "$URL"
+elif [[ "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+    xdg-open "$URL" > /dev/null 2>&1 || echo -e "${YELLOW}Please open $URL manually.${NC}"
+else # Fallback for other systems or if xdg-open fails
+    echo -e "${YELLOW}Cannot automatically open browser. Please open $URL manually.${NC}"
 fi
 
-echo -e "\${GREEN}✓ Data Analysis GUI is now running!${NC}"
-echo -e "\${YELLOW}Press Ctrl+C to stop the servers${NC}"
+echo -e "\n${GREEN}✓ Data Analysis GUI should be running!${NC}"
+echo -e "${YELLOW}Backend logs are in the terminal where backend started (or check uvicorn output)."${NC}
+echo -e "${YELLOW}Frontend logs are in the terminal where frontend started."${NC}
+echo -e "${YELLOW}Press Ctrl+C in this terminal to stop both servers.${NC}\n"
 
-# Wait for user to press Ctrl+C
-trap "echo -e '\${YELLOW}Shutting down servers...${NC}'; if [[ \"\$OS\" != \"Windows\" || \"\$OSTYPE\" == \"msys\" || \"\$OSTYPE\" == \"cygwin\" ]]; then kill \$BACKEND_PID \$FRONTEND_PID 2>/dev/null; fi; echo -e '\${GREEN}Servers stopped${NC}'" INT
+# Keep the script running to manage background processes
+wait $BACKEND_PID
+wait $FRONTEND_PID
+# If wait returns immediately (process died), call cleanup
+cleanup
 
-# Keep script running until Ctrl+C is pressed
-if [[ "\$OS" != "Windows" || "\$OSTYPE" == "msys" || "\$OSTYPE" == "cygwin" ]]; then
-    wait
-fi
 EOF
 
-# Create Windows batch file for easier startup on Windows
+# Create start.bat (Windows CMD/PowerShell)
 cat > start.bat << 'EOF'
 @echo off
 echo Starting Data Analysis GUI...
+setlocal
+
+:: Store current directory
+set START_DIR=%CD%
 
 :: Start backend server
-start cmd /k "cd backend\app && ..\venv\Scripts\activate && uvicorn main:app --reload"
+echo Starting backend server...
+cd backend
+if not exist "venv\Scripts\activate.bat" (
+    echo ERROR: Backend virtual environment not found in .\backend\venv\
+    echo Please run install.sh first.
+    goto :eof
+)
+:: Start in a new window, activate venv, run uvicorn from backend dir
+start "Backend Server" cmd /k (echo Activating backend venv... ^& call venv\Scripts\activate.bat ^& echo Starting Uvicorn... ^& uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)
+cd %START_DIR%
 
-:: Wait for backend to start
-timeout /t 5 /nobreak
+:: Wait a bit for the backend server
+echo Waiting for backend (5s)...
+timeout /t 5 /nobreak > nul
 
 :: Start frontend server
-start cmd /k "cd frontend && npm start"
+echo Starting frontend server...
+cd frontend
+if not exist "node_modules" (
+    echo ERROR: Frontend dependencies not found in .\frontend\node_modules\
+    echo Please run install.sh first.
+    goto :eof
+)
+:: Start in a new window
+start "Frontend Server" cmd /k (echo Starting React app... ^& npm start)
+cd %START_DIR%
 
-:: Open browser after a short delay
-timeout /t 5 /nobreak
-start http://localhost:3000
+:: Wait a bit for the frontend server
+echo Waiting for frontend (5s)...
+timeout /t 5 /nobreak > nul
 
-echo Data Analysis GUI is now running!
-echo Close the command windows to stop the servers when done.
+:: Open browser
+echo Opening browser at http://localhost:3000
+start "" "http://localhost:3000"
+
+echo.
+echo Data Analysis GUI backend and frontend are starting!
+echo - Backend running in the "Backend Server" window (Port 8000).
+echo - Frontend running in the "Frontend Server" window (Port 3000).
+echo Close the command windows manually to stop the servers when done.
+echo.
+
+endlocal
 EOF
 
-# Make scripts executable
+# Make start.sh executable
 chmod +x start.sh
 
-# Final instructions
+echo -e "${GREEN}✓ Startup scripts created.${NC}"
+
+# --- Final Instructions ---
 echo -e "\n${GREEN}==================================================${NC}"
 echo -e "${GREEN}✓ Installation complete!${NC}"
 echo -e "${GREEN}==================================================${NC}"
 echo -e "${YELLOW}To start the application:${NC}"
-echo -e "  ${BLUE}• On macOS/Linux:${NC} ./start.sh"
-echo -e "  ${BLUE}• On Windows:${NC} start.bat ${NC}or ${BLUE}./start.sh${NC} (if using Git Bash)"
+echo -e "  ${BLUE}macOS/Linux/Git Bash:${NC} ./start.sh"
+echo -e "  ${BLUE}Windows (CMD/PowerShell):${NC} .\start.bat"
+echo -e "\n${YELLOW}Default Ports:${NC}"
+echo -e "  Backend API: ${BLUE}8000${NC}"
+echo -e "  Frontend UI: ${BLUE}3000${NC}"
+echo -e "\n${YELLOW}To use different ports (if defaults are taken):${NC}"
+echo -e "  Set environment variables ${RED}BEFORE${NC} running the start script:"
+echo -e "  ${CYAN}Example (macOS/Linux/Git Bash):${NC}"
+echo -e "    export BACKEND_PORT=8001"
+echo -e "    export PORT=3001"
+echo -e "    ./start.sh"
+echo -e "  ${CYAN}Example (Windows CMD):${NC}"
+echo -e "    set BACKEND_PORT=8001"
+echo -e "    set PORT=3001"
+echo -e "    .\start.bat"
+echo -e "  ${CYAN}Example (Windows PowerShell):${NC}"
+echo -e "    \$env:BACKEND_PORT = '8001'"
+echo -e "    \$env:PORT = '3001'"
+echo -e "    .\start.bat"
+echo -e "\n  ${RED}IMPORTANT:${NC} If you change ${YELLOW}BACKEND_PORT${NC}, you MUST manually update the"
+echo -e "  'proxy' setting in ${BLUE}frontend/package.json${NC} to match the new backend port"
+echo -e "  (e.g., \"proxy\": \"http://localhost:8001\") and then restart the frontend"
+echo -e "  (stop the script/windows and run start.sh/start.bat again)."
 echo -e "\n${YELLOW}The application will:${NC}"
-echo -e "  1. Start the backend server on http://localhost:8000"
-echo -e "  2. Start the frontend on http://localhost:3000"
-echo -e "  3. Open your web browser automatically"
+echo -e "  1. Start the backend server on the specified/default port."
+echo -e "  2. Start the frontend server on the specified/default port."
+echo -e "  3. Attempt to open the frontend URL in your web browser."
+echo -e "\n${YELLOW}To stop the application:${NC}"
+echo -e "  - If using ${BLUE}start.sh${NC}: Press ${RED}Ctrl+C${NC} in the terminal where you ran the script."
+echo -e "  - If using ${BLUE}start.bat${NC}: Close the ${RED}'Backend Server'${NC} and ${RED}'Frontend Server'${NC} command prompt windows."
 echo -e "${GREEN}==================================================${NC}"
 
-# Ask if user wants to start the application now
-read -p "Would you like to start the application now? (y/n) " -n 1 -r
-echo
+# Optional: Ask to start now
+read -p "Would you like to try starting the application now? (y/n) " -n 1 -r
+echo # Move to a new line
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "${GREEN}Starting application...${NC}"
-    if [[ "$OS" == "Windows" && "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" ]]; then
-        start start.bat
-    else
+    echo -e "\n${GREEN}Attempting to start application...${NC}"
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "darwin"* ]]; then
         ./start.sh
+    elif [[ "$OSTYPE" == "win32" ]]; then
+        start cmd /c start.bat # Use start cmd /c to launch the bat in a truly new process
+    else
+         echo -e "${YELLOW}Cannot determine OS type to auto-start. Please use start.sh or start.bat manually.${NC}"
     fi
 fi

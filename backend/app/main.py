@@ -6,8 +6,13 @@ import duckdb
 import io
 import json
 import re
+import os
 import tempfile
 from typing import Optional, List, Dict, Any, Union
+from pandas.errors import DataError
+
+# Import the services
+from .services import pandas_service, polars_service, sql_service # Adjusted import path
 
 app = FastAPI(title="Data Analysis GUI API")
 
@@ -24,6 +29,81 @@ app.add_middleware(
 datasets = {}
 transformations = {}
 
+# --- Helper to get current content ---
+def get_current_content(dataset_name: str) -> bytes:
+    """Gets the latest content bytes (original or transformed)."""
+    if dataset_name not in datasets:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found")
+    if dataset_name in transformations and transformations[dataset_name]["history"]:
+        # Return the content after the last transformation
+        return transformations[dataset_name]["current_content"]
+    else:
+        # Return original content if no transformations applied yet
+        return datasets[dataset_name]["content"]
+
+def update_transformation_state(dataset_name: str, engine: str, operation: str, params_or_code: Any, generated_code: str, previous_content: bytes, new_content: bytes):
+    """Updates the transformation state and history."""
+    if dataset_name not in datasets: return # Should not happen if called correctly
+
+    if dataset_name not in transformations:
+        transformations[dataset_name] = {"current_content": new_content, "history": []}
+    else:
+        transformations[dataset_name]["current_content"] = new_content
+
+    history_entry = {
+        "engine": engine,
+        "operation": operation,
+        "params_or_code": params_or_code,
+        "generated_code": generated_code,
+        "previous_content": previous_content,
+    }
+    transformations[dataset_name]["history"].append(history_entry)
+
+def _get_preview_from_content(content: bytes, engine: str, limit: int = 100, offset: int = 0) -> Dict:
+    """Helper to generate preview dict from bytes using specified engine."""
+    # Simplified preview generation logic based on get_dataset endpoint
+    try:
+        if engine == "pandas":
+            df = pd.read_csv(io.BytesIO(content))
+            return {
+                "data": df.iloc[offset:offset+limit].fillna('NaN').to_dict(orient="records"),
+                "columns": list(df.columns),
+                "row_count": len(df)
+            }
+        elif engine == "polars":
+            df = pl.read_csv(io.BytesIO(content))
+            return {
+                "data": df.slice(offset, limit).fill_nan('NaN').to_dicts(),
+                "columns": df.columns,
+                "row_count": df.height
+            }
+        elif engine == "sql":
+             # For preview, we create a temporary connection
+            con = duckdb.connect(":memory:")
+            table_name = "preview_table"
+            sql_service._load_data_to_duckdb(con, table_name, content)
+            query = f'SELECT * FROM "{table_name}"'
+            data_dicts, columns, total_rows = sql_service._execute_sql_query(con, query, preview_limit=limit)
+            con.close()
+            return { "data": data_dicts, "columns": columns, "row_count": total_rows }
+        else:
+             raise ValueError(f"Unsupported engine for preview: {engine}")
+    except Exception as e:
+         # Log error details for debugging
+        print(f"Error generating preview with {engine}: {e}")
+        # Fallback to pandas preview if preferred engine fails
+        try:
+            df = pd.read_csv(io.BytesIO(content))
+            return {
+                "data": df.iloc[offset:offset+limit].fillna('NaN').to_dict(orient="records"),
+                "columns": list(df.columns),
+                "row_count": len(df)
+            }
+        except Exception as pd_e:
+            print(f"Fallback pandas preview failed: {pd_e}")
+            raise HTTPException(status_code=500, detail=f"Error processing dataset preview: {e}")
+
+
 @app.get("/")
 async def read_root():
     return {"message": "Data Analysis GUI API is running"}
@@ -36,39 +116,24 @@ async def test_connection():
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), dataset_name: str = Form(...)):
     try:
-        # Print some debug information
-        print(f"Received file: {file.filename}, size: {file.size if hasattr(file, 'size') else 'unknown'}")
-        print(f"Dataset name: {dataset_name}")
-        
-        # Read the file content
         contents = await file.read()
-        print(f"Successfully read file content, size: {len(contents)} bytes")
-        
-        # Store the file content in memory
         datasets[dataset_name] = {
             "content": contents,
             "filename": file.filename
         }
-        
-        # Try to read the CSV to validate it
-        try:
-            df = pd.read_csv(io.BytesIO(contents))
-            preview = df.head(10).to_dict(orient="records")
-            columns = list(df.columns)
-            row_count = len(df)
-            
-            print(f"Successfully parsed CSV with {row_count} rows and {len(columns)} columns")
-            
-        except Exception as e:
-            print(f"CSV parsing error: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Invalid CSV file: {str(e)}")
-        
+        # Clear any previous transformations if overwriting
+        if dataset_name in transformations:
+            del transformations[dataset_name]
+
+        # Generate initial preview (using pandas by default)
+        preview_info = _get_preview_from_content(contents, engine="pandas", limit=10)
+
         return {
             "message": f"Successfully uploaded {file.filename}",
             "dataset_name": dataset_name,
-            "preview": preview,
-            "columns": columns,
-            "row_count": row_count
+            "preview": preview_info["data"],
+            "columns": preview_info["columns"],
+            "row_count": preview_info["row_count"]
         }
     except Exception as e:
         print(f"Upload error: {str(e)}")
@@ -76,64 +141,38 @@ async def upload_file(file: UploadFile = File(...), dataset_name: str = Form(...
 
 
 @app.get("/datasets")
-async def get_datasets():
+async def get_datasets_list(): # Renamed to avoid conflict
     return {"datasets": list(datasets.keys())}
 
 @app.get("/dataset/{dataset_name}")
-async def get_dataset(
-    dataset_name: str, 
-    engine: str = "pandas", 
-    limit: int = 10,
-    offset: int = 0
+async def get_dataset_preview( # Renamed for clarity
+    dataset_name: str,
+    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]),
+    limit: int = Query(100, ge=1), # Increase default preview size
+    offset: int = Query(0, ge=0)
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
-    try:
-        content = datasets[dataset_name]["content"]
-        
-        if engine == "pandas":
-            df = pd.read_csv(io.BytesIO(content))
-            return {
-                "data": df.iloc[offset:offset+limit].to_dict(orient="records"),
-                "columns": list(df.columns),
-                "row_count": len(df)
-            }
-        elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(content))
-            return {
-                "data": df.slice(offset, limit).to_dicts(),
-                "columns": df.columns,
-                "row_count": df.height
-            }
-        elif engine == "sql":
-            # Create an in-memory DuckDB database
-            con = duckdb.connect(":memory:")
-            
-            # Write the CSV to a temporary file for DuckDB to read
-            with tempfile.NamedTemporaryFile(suffix='.csv') as tmp:
-                tmp.write(content)
-                tmp.flush()
-                
-                # Register the CSV as a table
-                con.execute(f"CREATE TABLE temp_data AS SELECT * FROM read_csv_auto('{tmp.name}')")
-            
-            # Read the data with pagination
-            result = con.execute(f"SELECT * FROM temp_data LIMIT {limit} OFFSET {offset}").fetchall()
-            columns = [desc[0] for desc in con.description]
-            
-            # Get row count
-            row_count = con.execute("SELECT COUNT(*) FROM temp_data").fetchone()[0]
-            
-            return {
-                "data": [dict(zip(columns, row)) for row in result],
-                "columns": columns,
-                "row_count": row_count
-            }
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing dataset: {str(e)}")
+    """Gets the preview of the current state of the dataset."""
+    content = get_current_content(dataset_name)
+    preview_info = _get_preview_from_content(content, engine, limit, offset)
+
+    # Determine if undo/reset is possible
+    can_undo = dataset_name in transformations and bool(transformations[dataset_name]["history"])
+    can_reset = dataset_name in transformations and bool(transformations[dataset_name]["history"])
+
+    # Determine the code for the *last* operation, if any
+    last_code = ""
+    if can_undo:
+        last_code = transformations[dataset_name]["history"][-1].get("generated_code", "")
+
+
+    return {
+        "data": preview_info["data"],
+        "columns": preview_info["columns"],
+        "row_count": preview_info["row_count"],
+        "can_undo": can_undo,
+        "can_reset": can_reset,
+        "last_code": last_code # Send code of last operation for display consistency
+    }
 
 @app.get("/dataset-info/{dataset_name}")
 async def get_dataset_info(dataset_name: str):
@@ -295,1066 +334,488 @@ def create_histogram_data(series):
 async def perform_operation(
     dataset_name: str = Form(...),
     operation: str = Form(...),
-    params: str = Form(...),
-    engine: str = Form(default="pandas")
+    params: str = Form(...), # JSON string
+    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
+    previous_content = get_current_content(dataset_name) # Get state *before* this op
+    params_dict = json.loads(params)
+    new_content = None
+    result_data = None
+    columns = []
+    row_count = 0
+    generated_code = ""
+
     try:
-        content = datasets[dataset_name]["content"]
-        params_dict = json.loads(params)
-        
-        # Store current state for this dataset if not already tracked
-        if dataset_name not in transformations:
-            transformations[dataset_name] = {
-                "original_content": content,
-                "current_content": content,
-                "history": []
-            }
-        
-        # Load data based on engine
         if engine == "pandas":
-            df = pd.read_csv(io.BytesIO(transformations[dataset_name]["current_content"]))
-            result_df, code = process_pandas_operation(df, operation, params_dict)
-            
-            # Update the current state
+            df = pd.read_csv(io.BytesIO(previous_content))
+            result_df, generated_code = pandas_service.apply_pandas_operation(df, operation, params_dict)
             with io.BytesIO() as buffer:
                 result_df.to_csv(buffer, index=False)
-                buffer.seek(0)
-                transformations[dataset_name]["current_content"] = buffer.getvalue()
-                transformations[dataset_name]["history"].append({
-                    "operation": operation,
-                    "params": params_dict,
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dict(orient="records"),
-                "columns": list(result_df.columns),
-                "row_count": len(result_df),
-                "code": code
-            }
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine) # Use helper
+
         elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(transformations[dataset_name]["current_content"]))
-            result_df, code = process_polars_operation(df, operation, params_dict)
-            
-            # Update the current state
+            df = pl.read_csv(io.BytesIO(previous_content))
+            result_df, generated_code = polars_service.apply_polars_operation(df, operation, params_dict)
             with io.BytesIO() as buffer:
                 result_df.write_csv(buffer)
-                buffer.seek(0)
-                transformations[dataset_name]["current_content"] = buffer.getvalue()
-                transformations[dataset_name]["history"].append({
-                    "operation": operation,
-                    "params": params_dict,
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dicts(),
-                "columns": result_df.columns,
-                "row_count": result_df.height,
-                "code": code
-            }
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine)
+
         elif engine == "sql":
-            # Here we would process SQL operations
             con = duckdb.connect(":memory:")
-            result_data, columns, row_count, code = process_sql_operation(
-                con, 
-                transformations[dataset_name]["current_content"], 
-                operation, 
-                params_dict, 
-                dataset_name
+            table_name = f"data_{dataset_name}"
+            _temp_df = pd.read_csv(io.BytesIO(previous_content), nrows=0)
+            all_cols = list(_temp_df.columns)
+
+            # apply_sql_operation returns preview directly, no need for separate preview call
+            preview_data, result_columns, total_rows, generated_code = sql_service.apply_sql_operation(
+                con, previous_content, table_name, operation, params_dict, all_cols
             )
-            
-            # For SQL, we need to convert back to a DataFrame and store the CSV
-            with tempfile.NamedTemporaryFile(suffix='.csv') as tmp:
-                df_result = pd.DataFrame(result_data)
-                df_result.to_csv(tmp.name, index=False)
-                with open(tmp.name, 'rb') as f:
-                    transformations[dataset_name]["current_content"] = f.read()
-                    transformations[dataset_name]["history"].append({
-                        "operation": operation,
-                        "params": params_dict,
-                        "code": code
-                    })
-            
-            return {
-                "data": result_data,
-                "columns": columns,
-                "row_count": row_count,
-                "code": code
-            }
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
+            preview_info = { "data": preview_data, "columns": result_columns, "row_count": total_rows }
+
+            # Need full result for state update
+            full_df = con.execute(generated_code).fetchdf()
+            with io.BytesIO() as buffer:
+                full_df.to_csv(buffer, index=False)
+                new_content = buffer.getvalue()
+            con.close()
+
+        if new_content is None:
+             # This check might be redundant now if services raise errors, but keep for safety
+             raise HTTPException(status_code=500, detail="Operation failed internally: No new content generated.")
+
+        # Update state *after* successful execution
+        update_transformation_state(dataset_name, engine, operation, params_dict, generated_code, previous_content, new_content)
+
+        return {
+            "data": preview_info["data"],
+            "columns": preview_info["columns"],
+            "row_count": preview_info["row_count"],
+            "code": generated_code,
+            "can_undo": True, # An operation just succeeded
+            "can_reset": True
+        }
+
+    except (ValueError, pl.exceptions.PolarsError, duckdb.Error, pd.errors.ParserError) as ve:
+         # Catch specific known operational errors (like bad params, SQL errors, load errors)
+         print(f"Operation Handled Error ({engine}, {operation}): {type(ve).__name__}: {ve}")
+         raise HTTPException(status_code=400, detail=f"Operation failed: {str(ve)}")
+    except (TypeError, DataError) as pde:
+        # Catch specific Pandas data/type errors often from aggregations
+        print(f"Operation Pandas Data Error ({engine}, {operation}): {type(pde).__name__}: {pde}")
+        raise HTTPException(status_code=400, detail=f"Operation failed: Invalid data type for '{params_dict.get('agg_column', 'N/A')}'? Details: {str(pde)}")
+    except KeyError as ke:
+        # Catch errors from trying to access non-existent columns
+        print(f"Operation Key Error ({engine}, {operation}): {ke}")
+        raise HTTPException(status_code=400, detail=f"Operation failed: Column not found: {str(ke)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing operation: {str(e)}")
+        # Catch any other unexpected errors
+        print(f"Unexpected error in /operation ({engine}, {operation}): {type(e).__name__}: {e}")
+        # Print stack trace for debugging unexpected errors
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
 
 @app.post("/execute-code")
 async def execute_custom_code(
     dataset_name: str = Form(...),
     code: str = Form(...),
-    engine: str = Form(default="pandas")
+    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
+    content = get_current_content(dataset_name)
+    new_content = None
+    result_data = None
+    columns = []
+    row_count = 0
+
     try:
-        # Get the current content (which might be transformed from original)
-        if dataset_name in transformations:
-            content = transformations[dataset_name]["current_content"]
-        else:
-            content = datasets[dataset_name]["content"]
-            
         if engine == "pandas":
-            # Set up environment
             local_vars = {}
-            
-            # Load the DataFrame
-            exec("import pandas as pd", globals(), local_vars)
-            exec(f"df = pd.read_csv(io.BytesIO(content))", 
-                {"io": io, "content": content}, 
-                local_vars)
-            
-            # Execute the user code
+            # Provide pandas and io in the execution context
+            exec("import pandas as pd\nimport io", globals(), local_vars)
+            # Load current df state into 'df' variable
+            exec(f"df = pd.read_csv(io.BytesIO(content))", {"io": io, "content": content}, local_vars)
+
+            # Execute user's code
             exec(code, globals(), local_vars)
-            
-            # The result should be stored in the 'df' variable
+
             result_df = local_vars.get('df')
-            
-            if result_df is None or not isinstance(result_df, pd.DataFrame):
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Execution did not produce a valid DataFrame. Make sure your code assigns the result to 'df'."
-                )
-            
-            # Update the current state
+            if not isinstance(result_df, pd.DataFrame):
+                raise ValueError("Pandas code did not result in a DataFrame assigned to the 'df' variable.")
+
             with io.BytesIO() as buffer:
                 result_df.to_csv(buffer, index=False)
-                buffer.seek(0)
-                
-                if dataset_name not in transformations:
-                    transformations[dataset_name] = {
-                        "original_content": datasets[dataset_name]["content"],
-                        "current_content": buffer.getvalue(),
-                        "history": []
-                    }
-                else:
-                    transformations[dataset_name]["current_content"] = buffer.getvalue()
-                
-                transformations[dataset_name]["history"].append({
-                    "operation": "custom_code",
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dict(orient="records"),
-                "columns": list(result_df.columns),
-                "row_count": len(result_df),
-                "code": code
-            }
+                new_content = buffer.getvalue()
+            result_data = result_df.head(100).fillna('NaN').to_dict(orient="records")
+            columns = list(result_df.columns)
+            row_count = len(result_df)
+
         elif engine == "polars":
-            # Set up environment
             local_vars = {}
-            
-            # Load the DataFrame
-            exec("import polars as pl", globals(), local_vars)
-            exec(f"df = pl.read_csv(io.BytesIO(content))", 
-                {"io": io, "content": content}, 
-                local_vars)
-            
-            # Execute the user code
+            exec("import polars as pl\nimport io", globals(), local_vars)
+            exec(f"df = pl.read_csv(io.BytesIO(content))", {"io": io, "content": content}, local_vars)
             exec(code, globals(), local_vars)
-            
-            # The result should be stored in the 'df' variable
             result_df = local_vars.get('df')
-            
-            if result_df is None or not isinstance(result_df, pl.DataFrame):
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Execution did not produce a valid DataFrame. Make sure your code assigns the result to 'df'."
-                )
-            
-            # Update the current state
+            if not isinstance(result_df, pl.DataFrame):
+                 raise ValueError("Polars code did not result in a DataFrame assigned to the 'df' variable.")
+
             with io.BytesIO() as buffer:
                 result_df.write_csv(buffer)
-                buffer.seek(0)
-                
-                if dataset_name not in transformations:
-                    transformations[dataset_name] = {
-                        "original_content": datasets[dataset_name]["content"],
-                        "current_content": buffer.getvalue(),
-                        "history": []
-                    }
-                else:
-                    transformations[dataset_name]["current_content"] = buffer.getvalue()
-                
-                transformations[dataset_name]["history"].append({
-                    "operation": "custom_code",
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dicts(),
-                "columns": result_df.columns,
-                "row_count": result_df.height,
-                "code": code
-            }
+                new_content = buffer.getvalue()
+            result_data = result_df.head(100).fill_nan('NaN').to_dicts()
+            columns = result_df.columns
+            row_count = result_df.height
+
         elif engine == "sql":
-            # Set up DuckDB connection and execute SQL
             con = duckdb.connect(":memory:")
-            
-            # Load data into DuckDB
-            with tempfile.NamedTemporaryFile(suffix='.csv') as tmp:
-                tmp.write(content)
-                tmp.flush()
-                
-                # Create temp table from CSV
-                con.execute(f"CREATE TABLE temp_data AS SELECT * FROM read_csv_auto('{tmp.name}')")
-            
-            # Execute the SQL query
-            try:
-                result = con.execute(code).fetchall()
-                columns = [desc[0] for desc in con.description]
-                row_count = len(result)
-                
-                # Convert to list of dictionaries
-                result_data = [dict(zip(columns, row)) for row in result]
-                
-                # Update transformation state by first converting SQL result to a CSV
-                df_result = pd.DataFrame(result_data)
-                
-                with io.BytesIO() as buffer:
-                    df_result.to_csv(buffer, index=False)
-                    buffer.seek(0)
-                    
-                    if dataset_name not in transformations:
-                        transformations[dataset_name] = {
-                            "original_content": datasets[dataset_name]["content"],
-                            "current_content": buffer.getvalue(),
-                            "history": []
-                        }
-                    else:
-                        transformations[dataset_name]["current_content"] = buffer.getvalue()
-                    
-                    transformations[dataset_name]["history"].append({
-                        "operation": "custom_code",
-                        "code": code
-                    })
-                
-                return {
-                    "data": result_data[:100],  # Limit to 100 rows
-                    "columns": columns,
-                    "row_count": row_count,
-                    "code": code
-                }
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"SQL error: {str(e)}")
+            table_name = "data_table" # Use a consistent name for SQL execution
+            sql_service._load_data_to_duckdb(con, table_name, content)
+
+            # Execute the user's SQL query
+            # The query *is* the operation result
+            preview_data, columns, row_count = sql_service._execute_sql_query(con, code)
+            result_data = preview_data # Already limited preview
+
+            # Update state requires full result -> CSV
+            full_df = con.execute(code).fetchdf()
+            with io.BytesIO() as buffer:
+                full_df.to_csv(buffer, index=False)
+                new_content = buffer.getvalue()
+            con.close()
+
+        # --- Update state and return ---
+        if new_content is not None:
+             update_transformation_state(dataset_name, "custom_code", code, engine, new_content, code) # For custom code, generated_code is the code itself
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
+             raise HTTPException(status_code=500, detail="Code execution failed to produce new content state.")
+
+        return {
+            "data": result_data,
+            "columns": columns,
+            "row_count": row_count,
+            "code": code # Return the executed code
+        }
+
+    except (SyntaxError, NameError, TypeError, ValueError, AttributeError, KeyError, pd.errors.PandasError, pl.exceptions.PolarsError, duckdb.Error) as exec_err:
+         raise HTTPException(status_code=400, detail=f"Code execution failed: {type(exec_err).__name__}: {str(exec_err)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error executing code: {str(e)}")
+        print(f"Unexpected error in /execute-code: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during code execution: {str(e)}")
+
+# --- NEW Undo Endpoint ---
+@app.post("/undo/{dataset_name}")
+async def undo_last_operation(
+    dataset_name: str,
+    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]) # Engine for preview
+):
+    if dataset_name not in transformations or not transformations[dataset_name]["history"]:
+        raise HTTPException(status_code=400, detail="No operations to undo.")
+
+    history = transformations[dataset_name]["history"]
+    last_op = history.pop() # Remove last operation
+    restored_content = last_op["previous_content"]
+
+    # Update current content to the restored state
+    transformations[dataset_name]["current_content"] = restored_content
+
+    # Generate preview based on the restored state using the requested engine
+    preview_info = _get_preview_from_content(restored_content, engine)
+
+    # Check if further undo/reset is possible
+    can_undo = bool(history)
+    can_reset = bool(history) # Can reset if any history remains
+
+     # Determine the code for the *new* last operation (if any)
+    last_code = ""
+    if can_undo:
+        last_code = history[-1].get("generated_code", "")
+
+
+    return {
+        "message": f"Undid last operation ({last_op['operation']})",
+        "data": preview_info["data"],
+        "columns": preview_info["columns"],
+        "row_count": preview_info["row_count"],
+        "can_undo": can_undo,
+        "can_reset": can_reset,
+        "last_code": last_code
+    }
+
+# --- NEW Reset Endpoint ---
+@app.post("/reset/{dataset_name}")
+async def reset_transformations(
+    dataset_name: str,
+    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]) # Engine for preview
+):
+    if dataset_name not in datasets:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+
+    # Remove the transformation history and state
+    if dataset_name in transformations:
+        del transformations[dataset_name]
+
+    # Get the original content
+    original_content = datasets[dataset_name]["content"]
+
+    # Generate preview based on the original state
+    preview_info = _get_preview_from_content(original_content, engine)
+
+    return {
+        "message": f"Reset transformations for {dataset_name}",
+        "data": preview_info["data"],
+        "columns": preview_info["columns"],
+        "row_count": preview_info["row_count"],
+        "can_undo": False, # Reset means no history
+        "can_reset": False,
+        "last_code": "" # No code after reset
+    }
 
 @app.post("/save-transformation")
 async def save_transformation(
     dataset_name: str = Form(...),
     new_dataset_name: str = Form(...),
-    engine: str = Form(default="pandas")
+    engine: str = Form(default="pandas") # Engine used for preview, not critical here
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
-    if dataset_name not in transformations:
-        raise HTTPException(status_code=400, detail=f"No transformations exist for {dataset_name}")
-    
-    # Save current state as a new dataset
+    content_to_save = get_current_content(dataset_name) # Get latest state
+
+    # Save as a new *original* dataset
     datasets[new_dataset_name] = {
-        "content": transformations[dataset_name]["current_content"],
+        "content": content_to_save,
         "filename": f"{new_dataset_name}.csv"
     }
-    
-    # Get a preview of the new dataset
+    # Clear any potential transforms under the new name if overwriting
+    if new_dataset_name in transformations:
+        del transformations[new_dataset_name]
+
     try:
-        df = pd.read_csv(io.BytesIO(datasets[new_dataset_name]["content"]))
-        preview = df.head(10).to_dict(orient="records")
-        columns = list(df.columns)
-        row_count = len(df)
-        
+        preview_info = _get_preview_from_content(content_to_save, engine, limit=10)
         return {
             "message": f"Successfully saved transformation as {new_dataset_name}",
             "dataset_name": new_dataset_name,
-            "preview": preview,
-            "columns": columns,
-            "row_count": row_count
+            "preview": preview_info["data"],
+            "columns": preview_info["columns"],
+            "row_count": preview_info["row_count"]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error saving transformation: {str(e)}")
+        # Clean up the potentially saved dataset if preview fails? Maybe not critical.
+        raise HTTPException(status_code=500, detail=f"Error generating preview for saved transformation: {str(e)}")
 
 @app.get("/export/{dataset_name}")
 async def export_dataset(
     dataset_name: str,
-    format: str = "csv", 
-    engine: str = "pandas"
+    format: str = Query("csv", enum=["csv", "json", "excel"]),
+    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]) # Used for JSON/Excel conversion
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
-    # Get current content (original or transformed)
-    content = datasets[dataset_name]["content"]
-    if dataset_name in transformations:
-        content = transformations[dataset_name]["current_content"]
-    
+    content = get_current_content(dataset_name) # Get latest state
+
     try:
         if format == "csv":
-            return Response(
-                content=content,
-                media_type="text/csv",
-                headers={"Content-Disposition": f"attachment; filename={dataset_name}.csv"}
-            )
+            media_type="text/csv"
+            filename = f"{dataset_name}.csv"
+            file_content = content
         elif format == "json":
-            if engine == "pandas":
-                df = pd.read_csv(io.BytesIO(content))
-                json_content = df.to_json(orient="records", date_format="iso")
-                return Response(
-                    content=json_content,
-                    media_type="application/json",
-                    headers={"Content-Disposition": f"attachment; filename={dataset_name}.json"}
-                )
-            elif engine == "polars":
+            media_type="application/json"
+            filename = f"{dataset_name}.json"
+            if engine == "polars":
                 df = pl.read_csv(io.BytesIO(content))
-                json_content = df.to_json()
-                return Response(
-                    content=json_content,
-                    media_type="application/json",
-                    headers={"Content-Disposition": f"attachment; filename={dataset_name}.json"}
-                )
+                # Polars to_json might need buffer or file path depending on version
+                # Using pandas as intermediate might be simpler for now
+                # file_content = df.to_json(pretty=False) # Or df.write_json(buffer)
+                df_pd = pd.read_csv(io.BytesIO(content)) # Use pandas for JSON consistency
+                file_content = df_pd.to_json(orient="records", date_format="iso")
+
+            else: # Default to pandas for JSON export
+                df = pd.read_csv(io.BytesIO(content))
+                file_content = df.to_json(orient="records", date_format="iso")
         elif format == "excel":
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            filename = f"{dataset_name}.xlsx"
+            # Excel export typically needs pandas
             df = pd.read_csv(io.BytesIO(content))
-            
             with io.BytesIO() as buffer:
                 df.to_excel(buffer, index=False)
-                buffer.seek(0)
-                excel_content = buffer.getvalue()
-            
-            return Response(
-                content=excel_content,
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": f"attachment; filename={dataset_name}.xlsx"}
-            )
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported export format: {format}")
+                file_content = buffer.getvalue()
+        else: # Should be caught by Query enum, but belt-and-suspenders
+             raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
+
+        return Response(
+            content=file_content,
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
     except Exception as e:
+        print(f"Export Error ({format}, {engine}): {e}")
         raise HTTPException(status_code=500, detail=f"Error exporting dataset: {str(e)}")
 
 @app.post("/merge-datasets")
-async def merge_datasets(
+async def merge_datasets_endpoint(
     left_dataset: str = Form(...),
     right_dataset: str = Form(...),
     params: str = Form(...),
-    engine: str = Form(default="pandas")
+    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
 ):
-    if left_dataset not in datasets:
-        raise HTTPException(status_code=404, detail=f"Left dataset {left_dataset} not found")
-    
-    if right_dataset not in datasets:
-        raise HTTPException(status_code=404, detail=f"Right dataset {right_dataset} not found")
-    
+    # Get state of left dataset *before* merge
+    previous_content_left = get_current_content(left_dataset)
+    # Get current content of right dataset (could also be transformed)
+    right_content = get_current_content(right_dataset)
+    params_dict = json.loads(params)
+
+    new_content = None
+    preview_info = {}
+    generated_code = ""
+
     try:
-        # Get current content for both datasets
-        left_content = datasets[left_dataset]["content"]
-        if left_dataset in transformations:
-            left_content = transformations[left_dataset]["current_content"]
-            
-        right_content = datasets[right_dataset]["content"]
-        if right_dataset in transformations:
-            right_content = transformations[right_dataset]["current_content"]
-        
-        params_dict = json.loads(params)
-        
+        # --- Pandas Merge ---
         if engine == "pandas":
-            left_df = pd.read_csv(io.BytesIO(left_content))
+            left_df = pd.read_csv(io.BytesIO(previous_content_left))
             right_df = pd.read_csv(io.BytesIO(right_content))
-            
-            # Get merge parameters
-            how = params_dict.get("join_type", "inner")
-            left_on = params_dict.get("left_on")
-            right_on = params_dict.get("right_on")
-            
-            # Perform merge
-            result_df = pd.merge(
-                left_df,
-                right_df,
-                how=how,
-                left_on=left_on,
-                right_on=right_on
-            )
-            
-            # Generate code
-            code = f"# Merge {left_dataset} with {right_dataset}\n"
-            code += f"result_df = pd.merge(\n"
-            code += f"    left_df,\n"
-            code += f"    right_df,\n"
-            code += f"    how='{how}',\n"
-            code += f"    left_on='{left_on}',\n"
-            code += f"    right_on='{right_on}'\n"
-            code += f")"
-            
-            return {
-                "data": result_df.head(100).to_dict(orient="records"),
-                "columns": list(result_df.columns),
-                "row_count": len(result_df),
-                "code": code
-            }
+            result_df, generated_code = pandas_service.apply_pandas_merge(left_df, right_df, params_dict)
+            with io.BytesIO() as buffer:
+                result_df.to_csv(buffer, index=False)
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine)
+
+        # --- Polars Join ---
         elif engine == "polars":
-            left_df = pl.read_csv(io.BytesIO(left_content))
+            left_df = pl.read_csv(io.BytesIO(previous_content_left))
             right_df = pl.read_csv(io.BytesIO(right_content))
-            
-            # Get merge parameters
-            how = params_dict.get("join_type", "inner")
-            left_on = params_dict.get("left_on")
-            right_on = params_dict.get("right_on")
-            
-            # Perform join
-            result_df = left_df.join(
-                right_df,
-                left_on=left_on,
-                right_on=right_on,
-                how=how
-            )
-            
-            # Generate code
-            code = f"# Join {left_dataset} with {right_dataset}\n"
-            code += f"result_df = left_df.join(\n"
-            code += f"    right_df,\n"
-            code += f"    left_on='{left_on}',\n"
-            code += f"    right_on='{right_on}',\n"
-            code += f"    how='{how}'\n"
-            code += f")"
-            
-            return {
-                "data": result_df.head(100).to_dicts(),
-                "columns": result_df.columns,
-                "row_count": result_df.height,
-                "code": code
-            }
+            result_df, generated_code = polars_service.apply_polars_join(left_df, right_df, params_dict)
+            with io.BytesIO() as buffer:
+                result_df.write_csv(buffer)
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine)
+
+        # --- SQL Join ---
         elif engine == "sql":
-            # Set up DuckDB connection
             con = duckdb.connect(":memory:")
-            
-            # Load both datasets into temporary tables
-            with tempfile.NamedTemporaryFile(suffix='.csv') as left_tmp, tempfile.NamedTemporaryFile(suffix='.csv') as right_tmp:
-                left_tmp.write(left_content)
-                left_tmp.flush()
-                
-                right_tmp.write(right_content)
-                right_tmp.flush()
-                
-                # Create tables
-                con.execute(f"CREATE TABLE left_table AS SELECT * FROM read_csv_auto('{left_tmp.name}')")
-                con.execute(f"CREATE TABLE right_table AS SELECT * FROM read_csv_auto('{right_tmp.name}')")
-            
-            # Get join parameters
-            how = params_dict.get("join_type", "inner").upper()
-            left_on = params_dict.get("left_on")
-            right_on = params_dict.get("right_on")
-            
-            # Construct and execute SQL query
-            join_sql = f"""
-            SELECT *
-            FROM left_table
-            {how} JOIN right_table
-            ON left_table."{left_on}" = right_table."{right_on}"
-            """
-            
-            result = con.execute(join_sql).fetchall()
-            columns = [desc[0] for desc in con.description]
-            row_count = len(result)
-            
-            # Convert to list of dictionaries
-            result_data = [dict(zip(columns, row)) for row in result[:100]]
-            
-            return {
-                "data": result_data,
-                "columns": columns,
-                "row_count": row_count,
-                "code": join_sql
-            }
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
+            l_table, r_table = "left_table", "right_table"
+            sql_service._load_data_to_duckdb(con, l_table, previous_content_left)
+            sql_service._load_data_to_duckdb(con, r_table, right_content)
+            left_cols = [c[0] for c in con.execute(f'DESCRIBE "{l_table}"').fetchall()]
+            right_cols = [c[0] for c in con.execute(f'DESCRIBE "{r_table}"').fetchall()]
+
+            preview_data, result_columns, total_rows, generated_code = sql_service.apply_sql_join(
+                con, l_table, r_table, params_dict, left_cols, right_cols
+            )
+            preview_info = { "data": preview_data, "columns": result_columns, "row_count": total_rows }
+
+            full_df = con.execute(generated_code).fetchdf()
+            with io.BytesIO() as buffer:
+                full_df.to_csv(buffer, index=False)
+                new_content = buffer.getvalue()
+            con.close()
+
+        if new_content is None:
+             raise HTTPException(status_code=500, detail="Merge failed internally.")
+
+        # Update state of the *left* dataset
+        update_transformation_state(left_dataset, engine, "merge", params_dict, generated_code, previous_content_left, new_content)
+
+        return {
+            "message": f"Merged {left_dataset} and {right_dataset}. Result updated for {left_dataset}.",
+            "data": preview_info["data"],
+            "columns": preview_info["columns"],
+            "row_count": preview_info["row_count"],
+            "code": generated_code,
+            "can_undo": True,
+            "can_reset": True
+        }
+
+    except (ValueError, pl.exceptions.PolarsError, duckdb.Error, pd.errors.PandasError) as ve:
+        raise HTTPException(status_code=400, detail=f"Merge failed: {str(ve)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error merging datasets: {str(e)}")
+        print(f"Unexpected error in /merge-datasets: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during merge: {str(e)}")
 
 @app.post("/regex-operation")
 async def regex_operation(
     dataset_name: str = Form(...),
-    operation: str = Form(...),
-    regex: str = Form(...),
-    options: str = Form(...),
-    engine: str = Form(default="pandas")
+    operation: str = Form(...), # e.g., "filter_contains", "extract", "replace"
+    params: str = Form(...), # JSON string containing: column, regex, new_column (optional), replacement (optional), case_sensitive (optional), group (optional)
+    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
 ):
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_name} not found")
-    
     try:
-        # Get current content
-        content = datasets[dataset_name]["content"]
-        if dataset_name in transformations:
-            content = transformations[dataset_name]["current_content"]
-        
-        options_dict = json.loads(options)
-        
+        previous_content = get_current_content(dataset_name)
+    except HTTPException as e:
+        raise e
+
+    params_dict = json.loads(params)
+    new_content = None
+    preview_info = {}
+    generated_code = ""
+    operation_name = f"regex_{operation}" # For history
+
+    try:
         if engine == "pandas":
-            df = pd.read_csv(io.BytesIO(content))
-            
-            if operation == "filter_contains":
-                column = options_dict.get("column")
-                case_sensitive = options_dict.get("case_sensitive", False)
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                result_df = df[df[column].astype(str).str.contains(
-                    regex, 
-                    case=case_sensitive,
-                    regex=True,
-                    na=False
-                )]
-                
-                code = f"# Filter rows where {column} contains regex pattern\n"
-                code += f"df = df[df['{column}'].astype(str).str.contains(\n"
-                code += f"    r'{regex}',\n"
-                code += f"    case={case_sensitive},\n"
-                code += f"    regex=True,\n"
-                code += f"    na=False\n"
-                code += f")]"
-            
-            elif operation == "extract":
-                column = options_dict.get("column")
-                new_column = options_dict.get("new_column", f"{column}_extracted")
-                group_idx = options_dict.get("group", 0)
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                df[new_column] = df[column].astype(str).str.extract(f'({regex})', expand=False)
-                result_df = df
-                
-                code = f"# Extract data using regex pattern\n"
-                code += f"df['{new_column}'] = df['{column}'].astype(str).str.extract(r'({regex})', expand=False)"
-            
-            elif operation == "replace":
-                column = options_dict.get("column")
-                replacement = options_dict.get("replacement", "")
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                df[column] = df[column].astype(str).str.replace(
-                    regex,
-                    replacement,
-                    regex=True
-                )
-                result_df = df
-                
-                code = f"# Replace text using regex pattern\n"
-                code += f"df['{column}'] = df['{column}'].astype(str).str.replace(\n"
-                code += f"    r'{regex}',\n"
-                code += f"    '{replacement}',\n"
-                code += f"    regex=True\n"
-                code += f")"
-            
-            else:
-                raise HTTPException(status_code=400, detail=f"Unsupported regex operation: {operation}")
-            
-            # Update the current state
+            df = pd.read_csv(io.BytesIO(previous_content), low_memory=False)
+            # Delegate actual regex logic to pandas_service
+            result_df, generated_code = pandas_service.apply_pandas_regex(df, operation, params_dict)
+
             with io.BytesIO() as buffer:
                 result_df.to_csv(buffer, index=False)
-                buffer.seek(0)
-                
-                if dataset_name not in transformations:
-                    transformations[dataset_name] = {
-                        "original_content": datasets[dataset_name]["content"],
-                        "current_content": buffer.getvalue(),
-                        "history": []
-                    }
-                else:
-                    transformations[dataset_name]["current_content"] = buffer.getvalue()
-                
-                transformations[dataset_name]["history"].append({
-                    "operation": f"regex_{operation}",
-                    "regex": regex,
-                    "options": options_dict,
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dict(orient="records"),
-                "columns": list(result_df.columns),
-                "row_count": len(result_df),
-                "code": code
-            }
-        
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine)
+
         elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(content))
-            
-            if operation == "filter_contains":
-                column = options_dict.get("column")
-                case_sensitive = options_dict.get("case_sensitive", False)
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                result_df = df.filter(
-                    pl.col(column).cast(pl.Utf8).str.contains(
-                        regex,
-                        literal=False,
-                        case_sensitive=case_sensitive
-                    )
-                )
-                
-                code = f"# Filter rows where {column} contains regex pattern\n"
-                code += f"df = df.filter(\n"
-                code += f"    pl.col('{column}').cast(pl.Utf8).str.contains(\n"
-                code += f"        r'{regex}',\n"
-                code += f"        literal=False,\n"
-                code += f"        case_sensitive={case_sensitive}\n"
-                code += f"    )\n"
-                code += f")"
-            
-            elif operation == "extract":
-                column = options_dict.get("column")
-                new_column = options_dict.get("new_column", f"{column}_extracted")
-                group_idx = options_dict.get("group", 0)
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                result_df = df.with_column(
-                    pl.col(column).cast(pl.Utf8).str.extract(regex, group_index=group_idx).alias(new_column)
-                )
-                
-                code = f"# Extract data using regex pattern\n"
-                code += f"df = df.with_column(\n"
-                code += f"    pl.col('{column}').cast(pl.Utf8).str.extract(\n"
-                code += f"        r'{regex}',\n"
-                code += f"        group_index={group_idx}\n"
-                code += f"    ).alias('{new_column}')\n"
-                code += f")"
-            
-            elif operation == "replace":
-                column = options_dict.get("column")
-                replacement = options_dict.get("replacement", "")
-                
-                if column not in df.columns:
-                    raise HTTPException(status_code=400, detail=f"Column {column} not found")
-                
-                result_df = df.with_column(
-                    pl.col(column).cast(pl.Utf8).str.replace_all(regex, replacement).alias(column)
-                )
-                
-                code = f"# Replace text using regex pattern\n"
-                code += f"df = df.with_column(\n"
-                code += f"    pl.col('{column}').cast(pl.Utf8).str.replace_all(\n"
-                code += f"        r'{regex}',\n"
-                code += f"        '{replacement}'\n"
-                code += f"    ).alias('{column}')\n"
-                code += f")"
-            
-            else:
-                raise HTTPException(status_code=400, detail=f"Unsupported regex operation: {operation}")
-            
-            # Update the current state
+            df = pl.read_csv(io.BytesIO(previous_content))
+            # Delegate actual regex logic to polars_service
+            result_df, generated_code = polars_service.apply_polars_regex(df, operation, params_dict)
+
             with io.BytesIO() as buffer:
                 result_df.write_csv(buffer)
-                buffer.seek(0)
-                
-                if dataset_name not in transformations:
-                    transformations[dataset_name] = {
-                        "original_content": datasets[dataset_name]["content"],
-                        "current_content": buffer.getvalue(),
-                        "history": []
-                    }
-                else:
-                    transformations[dataset_name]["current_content"] = buffer.getvalue()
-                
-                transformations[dataset_name]["history"].append({
-                    "operation": f"regex_{operation}",
-                    "regex": regex,
-                    "options": options_dict,
-                    "code": code
-                })
-            
-            return {
-                "data": result_df.head(100).to_dicts(),
-                "columns": result_df.columns,
-                "row_count": result_df.height,
-                "code": code
-            }
-        
+                new_content = buffer.getvalue()
+            preview_info = _get_preview_from_content(new_content, engine)
+
         elif engine == "sql":
-            # Set up DuckDB connection
+            # Delegate to sql_service which should return full content bytes and code
+             # NOTE: Assumes sql_service is updated to handle regex and return full result + code
             con = duckdb.connect(":memory:")
-            
-            # Load data into DuckDB
-            with tempfile.NamedTemporaryFile(suffix='.csv') as tmp:
-                tmp.write(content)
-                tmp.flush()
-                
-                # Create temp table from CSV
-                con.execute(f"CREATE TABLE temp_data AS SELECT * FROM read_csv_auto('{tmp.name}')")
-            
-            if operation == "filter_contains":
-                column = options_dict.get("column")
-                case_sensitive = options_dict.get("case_sensitive", False)
-                
-                # # Construct SQL query with REGEXP_MATCHES
-                # sql_query = fr"""
-                # SELECT *
-                # FROM temp_data
-                # WHERE REGEXP_MATCHES("{column}", '{regex}'{', \'i\'' if not case_sensitive else ''})
-                # """
-                
-                result = con.execute(sql_query).fetchall()
-                columns = [desc[0] for desc in con.description]
-                row_count = len(result)
-                
-                # Convert to list of dictionaries
-                result_data = [dict(zip(columns, row)) for row in result[:100]]
-                
-                return {
-                    "data": result_data,
-                    "columns": columns,
-                    "row_count": row_count,
-                    "code": sql_query
-                }
-            
-            elif operation == "extract":
-                column = options_dict.get("column")
-                new_column = options_dict.get("new_column", f"{column}_extracted")
-                
-                # Construct SQL query with REGEXP_EXTRACT
-                sql_query = f"""
-                SELECT *,
-                       REGEXP_EXTRACT("{column}", '{regex}') AS "{new_column}"
-                FROM temp_data
-                """
-                
-                result = con.execute(sql_query).fetchall()
-                columns = [desc[0] for desc in con.description]
-                row_count = len(result)
-                
-                # Convert to list of dictionaries
-                result_data = [dict(zip(columns, row)) for row in result[:100]]
-                
-                return {
-                    "data": result_data,
-                    "columns": columns,
-                    "row_count": row_count,
-                    "code": sql_query
-                }
-            
-            elif operation == "replace":
-                column = options_dict.get("column")
-                replacement = options_dict.get("replacement", "")
-                
-                # Construct SQL query with REGEXP_REPLACE
-                sql_query = f"""
-                SELECT *,
-                       REGEXP_REPLACE("{column}", '{regex}', '{replacement}') AS "{column}_replaced"
-                FROM temp_data
-                """
-                
-                result = con.execute(sql_query).fetchall()
-                columns = [desc[0] for desc in con.description]
-                row_count = len(result)
-                
-                # Convert to list of dictionaries
-                result_data = [dict(zip(columns, row)) for row in result[:100]]
-                
-                return {
-                    "data": result_data,
-                    "columns": columns,
-                    "row_count": row_count,
-                    "code": sql_query
-                }
-            
-            else:
-                raise HTTPException(status_code=400, detail=f"Unsupported regex operation: {operation}")
-        
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error performing regex operation: {str(e)}")
-    
-# Add these functions to the main.py file if they're not already defined
+            table_name = f"data_{dataset_name.replace('-', '_')}"
 
-def process_pandas_operation(df, operation, params):
-    """Process pandas operations on DataFrame."""
-    code = ""
-    
-    if operation == "filter":
-        column = params.get("column")
-        operator = params.get("operator")
-        value = params.get("value")
-        
-        if not all([column, operator]):
-            raise ValueError("Column and operator are required for filter operation")
-        
-        if column not in df.columns:
-            raise ValueError(f"Column '{column}' not found in dataset")
-        
-        # Convert value to appropriate type based on column data
-        try:
-            if pd.api.types.is_numeric_dtype(df[column]):
-                value = float(value) if '.' in value else int(value)
-        except (ValueError, TypeError):
-            # Keep as string if conversion fails
-            pass
-        
-        # Create filter condition based on operator
-        if operator == "==":
-            code = f"df = df[df['{column}'] == {repr(value)}]"
-            result_df = df[df[column] == value]
-        elif operator == "!=":
-            code = f"df = df[df['{column}'] != {repr(value)}]"
-            result_df = df[df[column] != value]
-        elif operator == ">":
-            code = f"df = df[df['{column}'] > {repr(value)}]"
-            result_df = df[df[column] > value]
-        elif operator == "<":
-            code = f"df = df[df['{column}'] < {repr(value)}]"
-            result_df = df[df[column] < value]
-        elif operator == ">=":
-            code = f"df = df[df['{column}'] >= {repr(value)}]"
-            result_df = df[df[column] >= value]
-        elif operator == "<=":
-            code = f"df = df[df['{column}'] <= {repr(value)}]"
-            result_df = df[df[column] <= value]
-        elif operator == "contains":
-            code = f"df = df[df['{column}'].astype(str).str.contains({repr(value)}, na=False)]"
-            result_df = df[df[column].astype(str).str.contains(value, na=False)]
-        elif operator == "startswith":
-            code = f"df = df[df['{column}'].astype(str).str.startswith({repr(value)}, na=False)]"
-            result_df = df[df[column].astype(str).str.startswith(value, na=False)]
-        elif operator == "endswith":
-            code = f"df = df[df['{column}'].astype(str).str.endswith({repr(value)}, na=False)]"
-            result_df = df[df[column].astype(str).str.endswith(value, na=False)]
-        elif operator == "regex":
-            code = f"df = df[df['{column}'].astype(str).str.contains({repr(value)}, regex=True, na=False)]"
-            result_df = df[df[column].astype(str).str.contains(value, regex=True, na=False)]
-        else:
-            raise ValueError(f"Unsupported operator: {operator}")
-    
-    elif operation == "select_columns":
-        selected_columns = params.get("selected_columns", [])
-        
-        if not selected_columns:
-            raise ValueError("No columns selected for the operation")
-        
-        # Verify all columns exist
-        missing_columns = [col for col in selected_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Columns not found: {', '.join(missing_columns)}")
-        
-        code = f"df = df[{repr(selected_columns)}]"
-        result_df = df[selected_columns]
-    
-    elif operation == "sort":
-        sort_column = params.get("sort_column")
-        sort_order = params.get("sort_order", "ascending")
-        
-        if not sort_column:
-            raise ValueError("Sort column is required")
-        
-        if sort_column not in df.columns:
-            raise ValueError(f"Column '{sort_column}' not found in dataset")
-        
-        ascending = sort_order == "ascending"
-        code = f"df = df.sort_values('{sort_column}', ascending={ascending})"
-        result_df = df.sort_values(sort_column, ascending=ascending)
-    
-    elif operation == "rename":
-        renames = params.get("renames", [])
-        
-        if not renames:
-            raise ValueError("No column renames specified")
-        
-        rename_dict = {item["old_name"]: item["new_name"] for item in renames if "old_name" in item and "new_name" in item}
-        
-        if not rename_dict:
-            raise ValueError("Invalid rename parameters")
-        
-        # Check if all old_name columns exist
-        missing_columns = [col for col in rename_dict.keys() if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Columns not found: {', '.join(missing_columns)}")
-        
-        code = f"df = df.rename(columns={repr(rename_dict)})"
-        result_df = df.rename(columns=rename_dict)
-    
-    elif operation == "drop_columns":
-        drop_columns = params.get("drop_columns", [])
-        
-        if not drop_columns:
-            raise ValueError("No columns selected for dropping")
-        
-        # Check if all columns exist
-        missing_columns = [col for col in drop_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Columns not found: {', '.join(missing_columns)}")
-        
-        code = f"df = df.drop(columns={repr(drop_columns)})"
-        result_df = df.drop(columns=drop_columns)
-    
-    elif operation == "groupby":
-        group_column = params.get("group_column")
-        agg_column = params.get("agg_column")
-        agg_function = params.get("agg_function", "mean")
-        
-        if not all([group_column, agg_column]):
-            raise ValueError("Group column and aggregation column are required")
-        
-        if group_column not in df.columns:
-            raise ValueError(f"Group column '{group_column}' not found in dataset")
-        
-        if agg_column not in df.columns:
-            raise ValueError(f"Aggregation column '{agg_column}' not found in dataset")
-        
-        code = f"df = df.groupby('{group_column}')['{agg_column}'].{agg_function}().reset_index()"
-        result_df = getattr(df.groupby(group_column)[agg_column], agg_function)().reset_index()
-    
-    else:
-        raise ValueError(f"Unsupported operation: {operation}")
-    
-    return result_df, code
+            # This service function needs to be implemented/updated
+            new_content, generated_code = sql_service.apply_sql_regex_get_full(
+                 con, previous_content, table_name, operation, params_dict
+            )
+            con.close()
 
-def process_polars_operation(df, operation, params):
-    """Process polars operations on DataFrame."""
-    code = ""
-    
-    if operation == "filter":
-        column = params.get("column")
-        operator = params.get("operator")
-        value = params.get("value")
-        
-        if not all([column, operator]):
-            raise ValueError("Column and operator are required for filter operation")
-        
-        if column not in df.columns:
-            raise ValueError(f"Column '{column}' not found in dataset")
-        
-        # Try to convert value to appropriate type
-        try:
-            dtype = df[column].dtype
-            if pl.datatypes.is_numeric(dtype):
-                value = float(value) if '.' in value else int(value)
-        except (ValueError, TypeError):
-            # Keep as string if conversion fails
-            pass
-        
-        # Create filter condition based on operator
-        if operator == "==":
-            code = f"df = df.filter(pl.col('{column}') == {repr(value)})"
-            result_df = df.filter(pl.col(column) == value)
-        elif operator == "!=":
-            code = f"df = df.filter(pl.col('{column}') != {repr(value)})"
-            result_df = df.filter(pl.col(column) != value)
-        elif operator == ">":
-            code = f"df = df.filter(pl.col('{column}') > {repr(value)})"
-            result_df = df.filter(pl.col(column) > value)
-        elif operator == "<":
-            code = f"df = df.filter(pl.col('{column}') < {repr(value)})"
-            result_df = df.filter(pl.col(column) < value)
-        elif operator == ">=":
-            code = f"df = df.filter(pl.col('{column}') >= {repr(value)})"
-            result_df = df.filter(pl.col(column) >= value)
-        elif operator == "<=":
-            code = f"df = df.filter(pl.col('{column}') <= {repr(value)})"
-            result_df = df.filter(pl.col(column) <= value)
-        elif operator == "contains":
-            code = f"df = df.filter(pl.col('{column}').cast(pl.Utf8).str.contains({repr(value)}))"
-            result_df = df.filter(pl.col(column).cast(pl.Utf8).str.contains(value))
-        elif operator == "startswith":
-            code = f"df = df.filter(pl.col('{column}').cast(pl.Utf8).str.starts_with({repr(value)}))"
-            result_df = df.filter(pl.col(column).cast(pl.Utf8).str.starts_with(value))
-        elif operator == "endswith":
-            code = f"df = df.filter(pl.col('{column}').cast(pl.Utf8).str.ends_with({repr(value)}))"
-            result_df = df.filter(pl.col(column).cast(pl.Utf8).str.ends_with(value))
-        elif operator == "regex":
-            code = f"df = df.filter(pl.col('{column}').cast(pl.Utf8).str.contains({repr(value)}, literal=False))"
-            result_df = df.filter(pl.col(column).cast(pl.Utf8).str.contains(value, literal=False))
-        else:
-            raise ValueError(f"Unsupported operator: {operator}")
-    
-    # Add other polars operations here...
-    else:
-        raise ValueError(f"Unsupported operation: {operation}")
-    
-    return result_df, code
+            if new_content is None:
+                 raise ValueError("SQL regex operation failed to produce results.")
 
-def process_sql_operation(con, content, operation, params, dataset_name):
-    """Process SQL operations."""
-    import tempfile
-    
-    # Load data into DuckDB
-    with tempfile.NamedTemporaryFile(suffix='.csv') as tmp:
-        tmp.write(content)
-        tmp.flush()
-        
-        # Create temp table from CSV
-        con.execute(f"CREATE TABLE temp_data AS SELECT * FROM read_csv_auto('{tmp.name}')")
-    
-    if operation == "filter":
-        column = params.get("column")
-        operator = params.get("operator")
-        value = params.get("value")
-        
-        if not all([column, operator]):
-            raise ValueError("Column and operator are required for filter operation")
-        
-        # Map operators to SQL syntax
-        sql_operators = {
-            "==": "=",
-            "!=": "!=",
-            ">": ">",
-            "<": "<",
-            ">=": ">=",
-            "<=": "<="
+            preview_info = _get_preview_from_content(new_content, engine)
+
+
+        if new_content is None:
+             raise HTTPException(status_code=500, detail=f"Regex operation '{operation}' failed internally.")
+
+        # Update state after successful execution
+        update_transformation_state(dataset_name, engine, operation_name, params_dict, generated_code, previous_content, new_content)
+
+        can_undo = dataset_name in transformations and bool(transformations[dataset_name].get("history"))
+        can_reset = can_undo
+
+        return {
+            "message": f"Successfully applied regex '{operation}' on column '{params_dict.get('column', 'N/A')}'.",
+            "data": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "code": generated_code,
+            "can_undo": can_undo,
+            "can_reset": can_reset
         }
-        
-        if operator in sql_operators:
-            # For basic comparison operators
-            sql_op = sql_operators[operator]
-            
-            # Check if value should be quoted (non-numeric)
-            try:
-                float(value)
-                sql_value = value
-            except ValueError:
-                sql_value = f"'{value}'"
-            
-            sql_query = f'SELECT * FROM temp_data WHERE "{column}" {sql_op} {sql_value}'
-        
-        elif operator == "contains":
-            sql_query = f'SELECT * FROM temp_data WHERE "{column}" LIKE \'%{value}%\''
-        elif operator == "startswith":
-            sql_query = f'SELECT * FROM temp_data WHERE "{column}" LIKE \'{value}%\''
-        elif operator == "endswith":
-            sql_query = f'SELECT * FROM temp_data WHERE "{column}" LIKE \'%{value}\''
-        elif operator == "regex":
-            sql_query = f'SELECT * FROM temp_data WHERE REGEXP_MATCHES("{column}", \'{value}\')'
-        else:
-            raise ValueError(f"Unsupported operator: {operator}")
-        
-        result = con.execute(sql_query).fetchall()
-        columns = [desc[0] for desc in con.description]
-        row_count = len(result)
-        
-        # Convert to list of dictionaries
-        result_data = [dict(zip(columns, row)) for row in result]
-        
-        return result_data, columns, row_count, sql_query
-    
-    # Add other SQL operations here...
-    else:
-        raise ValueError(f"Unsupported operation: {operation}")
+
+    # Catch specific errors from services or regex processing
+    except (ValueError, TypeError, KeyError, pd.errors.PandasError, pl.exceptions.PolarsError, duckdb.Error, re.error, json.JSONDecodeError) as op_err:
+        print(f"Regex Operation Error ({engine}, {operation}): {type(op_err).__name__}: {op_err}")
+        # Provide more specific error if possible (e.g., invalid regex)
+        detail = f"Regex operation '{operation}' failed: {str(op_err)}"
+        if isinstance(op_err, KeyError):
+            detail = f"Regex operation failed: Column not found: {str(op_err)}"
+        elif isinstance(op_err, re.error):
+            detail = f"Regex operation failed: Invalid regular expression pattern: {str(op_err)}"
+        raise HTTPException(status_code=400, detail=detail)
+    except Exception as e:
+        print(f"Unexpected error in /regex-operation ({engine}, {operation}): {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred during regex operation: {str(e)}")

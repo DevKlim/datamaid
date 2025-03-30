@@ -11,6 +11,7 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    console.log('DEBUG: Submitting operation:', operation, 'with params:', params);
     onOperationSubmit(operation, params);
   };
 
