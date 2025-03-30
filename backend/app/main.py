@@ -19,8 +19,14 @@ app = FastAPI(title="Data Analysis GUI API")
 # Configure CORS to allow requests from frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*",
-                   "https://datamaid.netlify.app"],  # For development only, replace with specific origins in production
+    allow_origins=[
+        "http://localhost:3000",  # For local development
+        "http://127.0.0.1:3000",   # For local development
+        "http://127.0.0.1:3001",
+        "http://localhost:3001",
+        "http://127.0.0.1:3002",
+        "http://localhost:3002",
+        "https://datamaid.netlify.app"],  # For development only, replace with specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
