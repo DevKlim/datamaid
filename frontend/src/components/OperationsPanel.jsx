@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
+const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets, currentDataset, isLoading }) => {
   const [operation, setOperation] = useState('filter');
   const [params, setParams] = useState({});
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -31,31 +31,19 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
       operations: [
         { value: "groupby", label: "Group By (Single Column)" },
         { value: "groupby_multi", label: "Group By (Multiple Columns)" },
-        { value: "groupby_multi_agg", label: "Group By with Multiple Aggregations" },
-        { value: "groupby_select", label: "Select from Group By Result" }
+        { value: "groupby_multi_agg", label: "Group By with Multiple Aggregations" }
       ]
     },
     {
       groupName: "Reshaping",
       operations: [
         { value: "pivot_table", label: "Pivot Table" },
-        { value: "melt", label: "Melt (Wide to Long)" },
-        { value: "pivot", label: "Pivot (Long to Wide)" },
-        { value: "stack", label: "Stack Columns" },
-        { value: "unstack", label: "Unstack Rows" }
-      ]
-    },
-    {
-      groupName: "Index Operations",
-      operations: [
-        { value: "set_index", label: "Set Index" },
-        { value: "reset_index", label: "Reset Index" }
+        { value: "melt", label: "Melt (Wide to Long)" }
       ]
     },
     {
       groupName: "Joining & Merging",
       operations: [
-        { value: "join", label: "Join Datasets" },
         { value: "merge", label: "Merge Datasets" }
       ]
     }
@@ -67,11 +55,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Column:
-              </label>
+              <label className="input-label">Column:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.column || ''}
                 onChange={(e) => handleParamChange('column', e.target.value)}
                 required
@@ -83,11 +69,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Operator:
-              </label>
+              <label className="input-label">Operator:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.operator || ''}
                 onChange={(e) => handleParamChange('operator', e.target.value)}
                 required
@@ -106,18 +90,16 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Value:
-              </label>
+              <label className="input-label">Value:</label>
               <input
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="input-base"
                 type="text"
                 value={params.value || ''}
                 onChange={(e) => handleParamChange('value', e.target.value)}
                 required
               />
               {params.operator === 'regex' && (
-                <div className="mt-1 text-sm text-gray-500">
+                <div className="mt-1 text-xs text-maid-gray-dark">
                   Enter a valid regular expression (e.g., ^A.*e$ matches strings starting with 'A' and ending with 'e')
                 </div>
               )}
@@ -129,10 +111,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Columns to Select:
-              </label>
-              <div className="max-h-60 overflow-y-auto border rounded p-2">
+              <label className="input-label">Columns to Select:</label>
+              <div className="max-h-60 overflow-y-auto border rounded-md p-2 bg-white">
                 {columns.map((col, index) => (
                   <div key={index} className="flex items-center mb-2">
                     <input
@@ -148,9 +128,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                           handleParamChange('selected_columns', selectedCols.filter(c => c !== col));
                         }
                       }}
-                      className="mr-2"
+                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
                     />
-                    <label htmlFor={`col-${index}`}>{col}</label>
+                    <label htmlFor={`col-${index}`} className="text-sm text-maid-choco">{col}</label>
                   </div>
                 ))}
               </div>
@@ -162,11 +142,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Sort by Column:
-              </label>
+              <label className="input-label">Sort by Column:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.sort_column || ''}
                 onChange={(e) => handleParamChange('sort_column', e.target.value)}
                 required
@@ -178,10 +156,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Sort Order:
-              </label>
-              <div className="flex items-center">
+              <label className="input-label">Sort Order:</label>
+              <div className="flex items-center mt-2">
                 <input
                   type="radio"
                   id="ascending"
@@ -189,9 +165,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                   value="ascending"
                   checked={params.sort_order === 'ascending'}
                   onChange={() => handleParamChange('sort_order', 'ascending')}
-                  className="mr-2"
+                  className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
                 />
-                <label htmlFor="ascending" className="mr-4">Ascending</label>
+                <label htmlFor="ascending" className="text-sm text-maid-choco mr-4">Ascending</label>
                 
                 <input
                   type="radio"
@@ -200,9 +176,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                   value="descending"
                   checked={params.sort_order === 'descending'}
                   onChange={() => handleParamChange('sort_order', 'descending')}
-                  className="mr-2"
+                  className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
                 />
-                <label htmlFor="descending">Descending</label>
+                <label htmlFor="descending" className="text-sm text-maid-choco">Descending</label>
               </div>
             </div>
           </>
@@ -212,11 +188,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Group By Column:
-              </label>
+              <label className="input-label">Group By Column:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.group_column || ''}
                 onChange={(e) => handleParamChange('group_column', e.target.value)}
                 required
@@ -228,11 +202,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregation Column:
-              </label>
+              <label className="input-label">Aggregation Column:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.agg_column || ''}
                 onChange={(e) => handleParamChange('agg_column', e.target.value)}
                 required
@@ -244,11 +216,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregation Function:
-              </label>
+              <label className="input-label">Aggregation Function:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.agg_function || 'mean'}
                 onChange={(e) => handleParamChange('agg_function', e.target.value)}
                 required
@@ -270,10 +240,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Group By Columns:
-              </label>
-              <div className="max-h-40 overflow-y-auto border rounded p-2">
+              <label className="input-label">Group By Columns:</label>
+              <div className="max-h-40 overflow-y-auto border rounded-md p-2 bg-white">
                 {columns.map((col, index) => (
                   <div key={index} className="flex items-center mb-2">
                     <input
@@ -289,19 +257,17 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                           handleParamChange('group_columns', selectedCols.filter(c => c !== col));
                         }
                       }}
-                      className="mr-2"
+                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
                     />
-                    <label htmlFor={`grpcol-${index}`}>{col}</label>
+                    <label htmlFor={`grpcol-${index}`} className="text-sm text-maid-choco">{col}</label>
                   </div>
                 ))}
               </div>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregation Column:
-              </label>
+              <label className="input-label">Aggregation Column:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.agg_column || ''}
                 onChange={(e) => handleParamChange('agg_column', e.target.value)}
                 required
@@ -313,11 +279,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
               </select>
             </div>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregation Function:
-              </label>
+              <label className="input-label">Aggregation Function:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.agg_function || 'mean'}
                 onChange={(e) => handleParamChange('agg_function', e.target.value)}
                 required
@@ -335,107 +299,16 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
           </>
         );
       
-      case 'groupby_multi_agg':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Group By Column:
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.group_column || ''}
-                onChange={(e) => handleParamChange('group_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregations:
-              </label>
-              
-              {(params.aggregations || []).map((agg, index) => (
-                <div key={index} className="flex items-center mb-2 space-x-2">
-                  <select
-                    className="shadow border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                    value={agg.column || ''}
-                    onChange={(e) => {
-                      const newAggs = [...(params.aggregations || [])];
-                      newAggs[index] = { ...newAggs[index], column: e.target.value };
-                      handleParamChange('aggregations', newAggs);
-                    }}
-                    required
-                  >
-                    <option value="">Select column</option>
-                    {columns.map((col, idx) => (
-                      <option key={idx} value={col}>{col}</option>
-                    ))}
-                  </select>
-                  
-                  <select
-                    className="shadow border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                    value={agg.function || ''}
-                    onChange={(e) => {
-                      const newAggs = [...(params.aggregations || [])];
-                      newAggs[index] = { ...newAggs[index], function: e.target.value };
-                      handleParamChange('aggregations', newAggs);
-                    }}
-                    required
-                  >
-                    <option value="">Select function</option>
-                    <option value="mean">Mean</option>
-                    <option value="sum">Sum</option>
-                    <option value="count">Count</option>
-                    <option value="min">Min</option>
-                    <option value="max">Max</option>
-                  </select>
-                  
-                  <button
-                    type="button"
-                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded focus:outline-none focus:shadow-outline"
-                    onClick={() => {
-                      const newAggs = [...(params.aggregations || [])];
-                      newAggs.splice(index, 1);
-                      handleParamChange('aggregations', newAggs);
-                    }}
-                  >
-                    X
-                  </button>
-                </div>
-              ))}
-              
-              <button
-                type="button"
-                className="mt-2 bg-green-500 hover:bg-green-700 text-white font-bold py-1 px-2 rounded focus:outline-none focus:shadow-outline"
-                onClick={() => {
-                  const currentAggs = params.aggregations || [];
-                  handleParamChange('aggregations', [...currentAggs, { column: '', function: '' }]);
-                }}
-              >
-                Add Aggregation
-              </button>
-            </div>
-          </>
-        );
-      
       case 'rename':
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Column Renaming:
-              </label>
+              <label className="input-label">Column Renaming:</label>
               
               {(params.renames || []).map((rename, index) => (
                 <div key={index} className="flex items-center mb-2 space-x-2">
                   <select
-                    className="shadow border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    className="select-base"
                     value={rename.old_name || ''}
                     onChange={(e) => {
                       const newRenames = [...(params.renames || [])];
@@ -450,10 +323,10 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                     ))}
                   </select>
                   
-                  <span className="text-gray-600">→</span>
+                  <span className="text-maid-choco">→</span>
                   
                   <input
-                    className="shadow border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    className="input-base"
                     type="text"
                     placeholder="New name"
                     value={rename.new_name || ''}
@@ -467,21 +340,21 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                   
                   <button
                     type="button"
-                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded focus:outline-none focus:shadow-outline"
+                    className="btn btn-red px-2 py-1"
                     onClick={() => {
                       const newRenames = [...(params.renames || [])];
                       newRenames.splice(index, 1);
                       handleParamChange('renames', newRenames);
                     }}
                   >
-                    X
+                    ✕
                   </button>
                 </div>
               ))}
               
               <button
                 type="button"
-                className="mt-2 bg-green-500 hover:bg-green-700 text-white font-bold py-1 px-2 rounded focus:outline-none focus:shadow-outline"
+                className="mt-2 btn btn-coffee py-1 px-2 text-xs"
                 onClick={() => {
                   const currentRenames = params.renames || [];
                   handleParamChange('renames', [...currentRenames, { old_name: '', new_name: '' }]);
@@ -497,10 +370,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Columns to Drop:
-              </label>
-              <div className="max-h-60 overflow-y-auto border rounded p-2">
+              <label className="input-label">Columns to Drop:</label>
+              <div className="max-h-60 overflow-y-auto border rounded-md p-2 bg-white">
                 {columns.map((col, index) => (
                   <div key={index} className="flex items-center mb-2">
                     <input
@@ -516,9 +387,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
                           handleParamChange('drop_columns', dropCols.filter(c => c !== col));
                         }
                       }}
-                      className="mr-2"
+                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
                     />
-                    <label htmlFor={`dropcol-${index}`}>{col}</label>
+                    <label htmlFor={`dropcol-${index}`} className="text-sm text-maid-choco">{col}</label>
                   </div>
                 ))}
               </div>
@@ -526,249 +397,28 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
           </>
         );
       
-      case 'pivot_table':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Index Column (rows):
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.index_col || ''}
-                onChange={(e) => handleParamChange('index_col', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Column (for column headers):
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.columns_col || ''}
-                onChange={(e) => handleParamChange('columns_col', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Values Column:
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.values_col || ''}
-                onChange={(e) => handleParamChange('values_col', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Aggregation Function:
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.pivot_agg_function || 'mean'}
-                onChange={(e) => handleParamChange('pivot_agg_function', e.target.value)}
-                required
-              >
-                <option value="mean">Mean</option>
-                <option value="sum">Sum</option>
-                <option value="count">Count</option>
-                <option value="min">Min</option>
-                <option value="max">Max</option>
-              </select>
-            </div>
-          </>
-        );
-      
-      case 'melt':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                ID Variables (columns to keep as is):
-              </label>
-              <div className="max-h-40 overflow-y-auto border rounded p-2">
-                {columns.map((col, index) => (
-                  <div key={index} className="flex items-center mb-2">
-                    <input
-                      type="checkbox"
-                      id={`id-var-${index}`}
-                      value={col}
-                      checked={params.id_vars?.includes(col) || false}
-                      onChange={(e) => {
-                        const idVars = params.id_vars || [];
-                        if (e.target.checked) {
-                          handleParamChange('id_vars', [...idVars, col]);
-                        } else {
-                          handleParamChange('id_vars', idVars.filter(c => c !== col));
-                        }
-                      }}
-                      className="mr-2"
-                    />
-                    <label htmlFor={`id-var-${index}`}>{col}</label>
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Value Variables (columns to "unpivot"):
-              </label>
-              <div className="max-h-40 overflow-y-auto border rounded p-2">
-                {columns.map((col, index) => (
-                  <div key={index} className="flex items-center mb-2">
-                    <input
-                      type="checkbox"
-                      id={`value-var-${index}`}
-                      value={col}
-                      checked={params.value_vars?.includes(col) || false}
-                      onChange={(e) => {
-                        const valueVars = params.value_vars || [];
-                        if (e.target.checked) {
-                          handleParamChange('value_vars', [...valueVars, col]);
-                        } else {
-                          handleParamChange('value_vars', valueVars.filter(c => c !== col));
-                        }
-                      }}
-                      className="mr-2"
-                    />
-                    <label htmlFor={`value-var-${index}`}>{col}</label>
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Variable Name (name for the column containing former column names):
-              </label>
-              <input
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                type="text"
-                value={params.var_name || 'variable'}
-                onChange={(e) => handleParamChange('var_name', e.target.value)}
-                required
-              />
-            </div>
-            
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Value Name (name for the column containing values):
-              </label>
-              <input
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                type="text"
-                value={params.value_name || 'value'}
-                onChange={(e) => handleParamChange('value_name', e.target.value)}
-                required
-              />
-            </div>
-          </>
-        );
-      
-      case 'set_index':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Set Column as Index:
-              </label>
-              <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                value={params.index_column || ''}
-                onChange={(e) => handleParamChange('index_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={params.drop || false}
-                  onChange={(e) => handleParamChange('drop', e.target.checked)}
-                  className="mr-2"
-                />
-                <span className="text-gray-700 text-sm font-bold">
-                  Drop column after setting as index
-                </span>
-              </label>
-            </div>
-          </>
-        );
-      
-      case 'reset_index':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={params.drop_index || false}
-                  onChange={(e) => handleParamChange('drop_index', e.target.checked)}
-                  className="mr-2"
-                />
-                <span className="text-gray-700 text-sm font-bold">
-                  Drop the index column (don't include it in the result)
-                </span>
-              </label>
-            </div>
-          </>
-        );
-      
-      case 'join':
       case 'merge':
         return (
           <>
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Right Dataset:
-              </label>
+              <label className="input-label">Right Dataset:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.right_dataset || ''}
                 onChange={(e) => handleParamChange('right_dataset', e.target.value)}
                 required
               >
                 <option value="">Select another dataset</option>
-                {/* This would be populated with available datasets */}
-                <option value="dataset1">Dataset 1</option>
-                <option value="dataset2">Dataset 2</option>
+                {availableDatasets.map((ds, index) => (
+                  <option key={index} value={ds}>{ds}</option>
+                ))}
               </select>
             </div>
             
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Join Type:
-              </label>
+              <label className="input-label">Join Type:</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.join_type || 'inner'}
                 onChange={(e) => handleParamChange('join_type', e.target.value)}
                 required
@@ -781,11 +431,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
             </div>
             
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Left Key (current dataset):
-              </label>
+              <label className="input-label">Left Key (current dataset):</label>
               <select
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="select-base"
                 value={params.left_on || ''}
                 onChange={(e) => handleParamChange('left_on', e.target.value)}
                 required
@@ -798,11 +446,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
             </div>
             
             <div className="mb-4">
-              <label className="block text-gray-700 text-sm font-bold mb-2">
-                Right Key (other dataset):
-              </label>
+              <label className="input-label">Right Key (other dataset):</label>
               <input
-                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                className="input-base"
                 type="text"
                 placeholder="Column name in right dataset"
                 value={params.right_on || ''}
@@ -815,7 +461,7 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
       
       default:
         return (
-          <div className="text-gray-600 italic">
+          <div className="text-maid-gray-dark italic text-center p-4">
             Please select an operation to see its parameters.
           </div>
         );
@@ -823,23 +469,21 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
   };
 
   return (
-    <div className="bg-white p-4 rounded shadow">
-      <h2 className="text-xl font-semibold mb-4">Data Operations</h2>
+    <div className="card bg-white p-4 rounded-lg shadow-soft border border-maid-gray-light">
+      <h2 className="card-header">Data Operations</h2>
       
       <form onSubmit={handleSubmit}>
         <div className="mb-4">
-          <label className="block text-gray-700 text-sm font-bold mb-2">
-            Operation Category:
-          </label>
+          <label className="input-label">Operation Category:</label>
           <div className="flex flex-wrap gap-2 mb-2">
             {operationGroups.map((group, index) => (
               <button
                 key={index}
                 type="button"
-                className={`py-1 px-3 rounded text-sm font-medium ${
+                className={`py-1 px-3 rounded-md text-sm font-medium ${
                   showAdvanced === group.groupName 
-                    ? 'bg-blue-600 text-white' 
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    ? 'bg-coffee text-white' 
+                    : 'bg-maid-cream text-maid-choco hover:bg-maid-cream-dark'
                 }`}
                 onClick={() => setShowAdvanced(
                   showAdvanced === group.groupName ? false : group.groupName
@@ -853,17 +497,15 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         
         {showAdvanced && (
           <div className="mb-4">
-            <label className="block text-gray-700 text-sm font-bold mb-2">
-              Operation:
-            </label>
+            <label className="input-label">Operation:</label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {operationGroups.find(g => g.groupName === showAdvanced)?.operations.map((op, index) => (
                 <div 
                   key={index}
-                  className={`p-2 border rounded cursor-pointer ${
+                  className={`p-2 border rounded-md cursor-pointer ${
                     operation === op.value 
-                      ? 'bg-blue-100 border-blue-500' 
-                      : 'hover:bg-gray-100'
+                      ? 'bg-coffee-light bg-opacity-20 border-coffee' 
+                      : 'hover:bg-maid-cream border-maid-gray-light'
                   }`}
                   onClick={() => {
                     setOperation(op.value);
@@ -879,11 +521,9 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
         
         {!showAdvanced && (
           <div className="mb-4">
-            <label className="block text-gray-700 text-sm font-bold mb-2">
-              Common Operations:
-            </label>
+            <label className="input-label">Common Operations:</label>
             <select
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+              className="select-base"
               value={operation}
               onChange={(e) => {
                 setOperation(e.target.value);
@@ -899,16 +539,17 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit }) => {
           </div>
         )}
         
-        <div className="mb-6 p-4 bg-gray-50 rounded">
+        <div className="mb-6 p-4 bg-maid-cream-light rounded-md border border-maid-gray-light">
           {renderOperationForm()}
         </div>
         
         <div className="flex items-center justify-end">
           <button
             type="submit"
-            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+            className="btn btn-coffee"
+            disabled={isLoading}
           >
-            Apply
+            {isLoading ? 'Processing...' : 'Apply'}
           </button>
         </div>
       </form>

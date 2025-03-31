@@ -143,160 +143,148 @@ In the long run, this project aspires to be a **learning platform for data scien
 
 Stay tuned for updates, and thank you for your interest in the project! With the support of the community, we hope to lower the barrier to entry in data science and make learning data analysis an engaging, interactive experience.
 
-# Data Analysis GUI
-
-A graphical interface tool for data analysis operations using pandas, polars, and SQL queries.
+## BELOW IS UPDATED STATE
+# DataMaid: Your Friendly Data Analysis Helper 🧹✨
 
 ## Overview
 
-This project provides an intuitive GUI for data analysis operations, allowing users (especially students and beginners) to work with datasets without needing to write code. It generates equivalent pandas, polars, or SQL code for every operation, helping users learn data manipulation syntax through practical examples.
+Welcome to **DataMaid**! This project is an intuitive **Graphical User Interface (GUI)** designed to make data exploration and manipulation accessible and maybe even a little bit cute! Inspired by helpful maid cafe staff, DataMaid assists students and beginners in working with datasets without needing extensive coding knowledge upfront.
 
-Think of it as a "Symbolab for pandas" – just as Symbolab provides step-by-step solutions for math problems, this application provides a visual approach to data analysis tasks with the code shown for each operation.
+Think of it as a **visual guide for data wrangling** – just as Symbolab provides step-by-step math solutions, DataMaid offers a visual, interactive approach to common data analysis tasks. Users (especially those learning tools like pandas or SQL, perhaps in courses like UCSD’s DSC10 or DSC80) can upload datasets and perform operations through a friendly, modern interface with a touch of pastel charm.
 
-## Features
+DataMaid executes these operations using **pandas**, **polars**, **SQL** (via DuckDB), or even through fundamental **Relational Algebra** concepts. Most importantly, it **shows you the code** (Pandas, Polars, or SQL) generated for each GUI action, helping you learn by doing and seeing. The goal is to demystify data tasks while making the learning process more engaging.
 
-- **Upload and analyze CSV files** locally (no server-side storage)
-- **Perform data operations** through a user-friendly interface:
-  - Filter rows based on column values
-  - Group by columns and apply aggregation functions
-  - Rename columns for clarity
-- **Multiple execution engines**:
-  - Pandas: Standard Python data analysis library
-  - Polars: High-performance DataFrame library written in Rust (5-10× faster than pandas)
-  - SQL: SQL-like queries powered by DuckDB
-- **Real-time code generation** showing the equivalent code for each operation
-- **Interactive data preview** with pagination for larger datasets
+## Core Features
 
-## Getting Started
+*   **Flexible Data Input:**
+    *   Upload **CSV files**.
+    *   Paste **raw text data** (CSV or JSON format).
+    *   Upload **database files** (SQLite, DuckDB).
+    *   Import specific **tables from uploaded databases**.
+    *   *Data stays local on your machine.*
 
-### Prerequisites
+*   **GUI-Based Data Operations:** A point-and-click interface for:
+    *   **Basic Transformations:** Filtering (with regex!), Selecting, Dropping, Renaming columns, Sorting.
+    *   **Data Cleaning:** Handling missing values (Fill/Drop), Changing data types, Dropping duplicates.
+    *   **Feature Engineering:** Creating columns using expressions, String/Date manipulations.
+    *   **Aggregations & Reshaping:** GroupBy with multiple aggregations, Pivot tables, Melt (Wide-to-Long).
+    *   **Joining & Set Operations:** Merging/Joining datasets (Inner, Left, Right, Outer), Relational Algebra set operations.
+    *   **(Planned):** Window functions, Sampling.
 
-- Python 3.9+ (for the backend)
-- Node.js 18+ (for the frontend)
-- npm (Node.js package manager)
+*   **Relational Algebra Support:** Visually perform RA operations:
+    *   Select (σ), Project (π), Rename (ρ)
+    *   Union (∪), Set Difference (-), Intersection (∩)
+    *   Cartesian Product (×)
+    *   Natural Join (⋈), Theta Join (⋈_θ)
+    *   *Generates and displays the equivalent SQL.*
 
-### Installation
+*   **Multiple Execution Engines:** Choose your backend:
+    *   **Pandas Mode:** Learn standard Python data workflows.
+    *   **Polars Mode:** Experience high-performance data manipulation.
+    *   **SQL Mode:** Leverage the power of SQL with DuckDB. (RA uses this).
 
-#### Mac Installation (One-Click Setup)
+*   **Live Code Generation:** See the Pandas, Polars, or SQL code for every GUI action. Learn by example!
 
-For Mac users, we provide a simple installation script:
+*   **Interactive Data Preview:** Real-time table updates, pagination, undo/reset functionality.
 
-1. Download the repository
-2. Open Terminal and navigate to the project directory
-3. Run the following command to make the installer executable:
-   ```bash
-   chmod +x mac_install_frontend.sh
-   ```
-4. Execute the installer:
-   ```bash
-   ./mac_install_frontend.sh
-   ```
-5. The script will install all dependencies and start the frontend application
+*   **Cute & Modern UI:** A clean, aesthetically pleasing interface with rounded corners and a soft color palette inspired by maid cafes, designed to be less intimidating and more fun.
 
-#### Manual Installation
+*   **Local-First:** Your data is processed entirely within your browser and the local backend process.
 
-##### Backend Setup:
-```bash
-# Create and activate virtual environment
-cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+## Future Features (Planned)
 
-# Install dependencies
-pip install -r requirements.txt
+*(Keep this section largely the same, maybe rephrase slightly if needed)*
+*   **Natural Language Problem Solver...**
+*   **AI-Assisted Intent Recognition...**
+*   **Smart Function Recommendations...**
+*   **Additional Visualization...**
+*   **Collaboration and Cloud Features...**
 
-# Start the server
-cd app
-uvicorn main:app --reload
-```
+## Screenshots
 
-##### Frontend Setup:
-```bash
-# Install dependencies
-cd frontend
-npm install
+**(❗ IMPORTANT: Replace these placeholders with actual screenshots of the new UI!)**
 
-# Start the development server
-npm start
-```
+*   *[Screenshot of the main interface with a loaded dataset]*
+*   *[Screenshot showing an operation panel, e.g., Filter or GroupBy]*
+*   *[Screenshot highlighting the generated code display]*
+*   *[Screenshot of the Relational Algebra panel, if applicable]*
+
+## Tech Stack
+
+*   **Frontend:** [React](https://reactjs.org/) (JavaScript/JSX) with [Tailwind CSS](https://tailwindcss.com/) (customized for theme).
+*   **Backend API:** [FastAPI](https://fastapi.tiangolo.com/) (Python).
+*   **Data Processing Engines:**
+    *   **pandas**
+    *   **polars**
+    *   **DuckDB** (Powers SQL Mode, RA operations, DB file reading)
+*   **Font:** [Nunito](https://fonts.google.com/specimen/Nunito) (or your chosen font).
+*   **(Future):** LLM Integration (Local/Open models preferred).
+*   **State Management:** Backend in-memory dictionaries, Frontend React state.
 
 ## Project Structure
 
-```
 data-analysis-gui/
 ├── backend/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py
-│   │   ├── operations/
-│   │   │   ├── __init__.py
-│   │   │   ├── filter.py
-│   │   │   ├── groupby.py
-│   │   │   └── rename.py
-│   │   └── services/
-│   │       ├── __init__.py
-│   │       ├── pandas_service.py
-│   │       ├── polars_service.py
-│   │       └── sql_service.py
-│   └── requirements.txt
-└── frontend/
-    ├── public/
-    │   └── index.html
-    ├── src/
-    │   ├── components/
-    │   │   ├── DataTable.jsx
-    │   │   ├── NavBar.jsx
-    │   │   ├── OperationsPanel.jsx
-    │   │   └── CodeDisplay.jsx
-    │   ├── services/
-    │   │   └── api.js
-    │   ├── App.jsx
-    │   └── index.jsx
-    └── package.json
-```
+│ ├── app/
+│ │ ├── init.py
+│ │ ├── main.py
+│ │ └── services/
+│ │ ├── init.py
+│ │ ├── pandas_service.py
+│ │ ├── polars_service.py
+│ │ ├── sql_service.py
+│ │ └── relational_algebra_service.py
+│ ├── requirements.txt
+│ └── ...
+├── frontend/
+│ ├── public/
+│ ├── src/
+│ │ ├── components/
+│ │ ├── services/
+│ │ ├── App.jsx
+│ │ └── index.jsx | index.css | tailwind.config.js
+│ └── package.json
+└── ...
 
-## Usage
 
-1. **Upload a CSV file**: Click the "Upload CSV" button in the navbar and select your file
-2. **View the data**: The uploaded data will be displayed in a table
-3. **Select an operation**: Choose from Filter, Group By, or Rename Column
-4. **Configure the operation**: Fill in the required parameters
-5. **Apply the operation**: Click "Apply" to execute
-6. **View the results**: See the updated data table and the generated code
-7. **Switch engines**: Select Pandas, Polars, or SQL to see different code implementations
+## Design Philosophy
 
-## Technologies Used
+*   **Education-First:** Show the code, make learning interactive.
+*   **Intuitive & Visual:** Point-and-click interactions.
+*   **Aesthetically Cute & Friendly:** A modern, soft UI theme to make data work feel less daunting and more inviting.
+*   **Instant Feedback:** See results immediately.
+*   **Performance:** Leverage efficient backends (Polars, DuckDB).
+*   **Simplify, Don't Dumb Down:** Accessible interface for powerful operations.
 
-- **Backend**:
-  - FastAPI: Modern Python web framework
-  - Pandas: Data analysis library
-  - Polars: High-performance DataFrame library
-  - DuckDB: In-process SQL database engine
+## Getting Started
 
-- **Frontend**:
-  - React: UI library
-  - Tailwind CSS: Utility-first CSS framework
-  - Axios: HTTP client
-  - Chart.js: Visualization library
+*(Keep instructions the same, but ensure they still work)*
 
-## Troubleshooting
+1.  **Prerequisites:** Python 3.9+, Node.js 18+, `pip`, `npm` (or `yarn`).
+2.  **Clone Repository:** `git clone <repo_url>`
+3.  **Backend Setup (FastAPI):**
+    ```bash
+    cd backend
+    python -m venv venv
+    source venv/bin/activate  # Windows: venv\Scripts\activate
+    pip install -r requirements.txt
+    cd app
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    ```
+4.  **Frontend Setup (React):**
+    ```bash
+    cd frontend # From project root
+    npm install
+    npm start # Or npm run dev (Should open e.g., http://localhost:3000)
+    ```
+5.  **Use DataMaid:** Open the frontend URL. Upload data (CSV, Paste, DB) and interact with the UI. Observe the themed components and generated code!
 
-- **Backend Connection Issues**: Ensure the backend is running on port 8000 and that your browser allows connections to localhost
-- **File Upload Errors**: Check that your CSV file is properly formatted
-- **Operation Errors**: Verify the data types in your operation parameters match your data (e.g., numeric comparisons for numeric columns)
-
-## Future Features
-
-- Natural language query interpretation using LLMs
-- Smart operation recommendations based on dataset characteristics
-- Additional visualizations (scatter plots, box plots, etc.)
-- Support for more file formats (Excel, JSON, Parquet)
-- Additional operations (join/merge, pivot tables, sorting)
+*(Ensure frontend's `REACT_APP_API_URL` in `.env` (if used) points to `http://localhost:8000`)*
 
 ## Contributing
 
-Contributions are welcome! Feel free to submit issues or pull requests if you have ideas for improvements or have found bugs.
+Contributions welcome! Please open an issue or submit a PR. Let's make DataMaid even more helpful and cute!
 
-## License
+## Project Status and Future Outlook
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+DataMaid is actively developed. Core data operations, multiple input methods, multi-engine support, RA, and the new UI theme are implemented. Focus is on refining usability, adding more features (like visualizations and AI assistance), and ensuring educational value. We aim to provide a uniquely friendly and powerful learning tool for aspiring data analysts.

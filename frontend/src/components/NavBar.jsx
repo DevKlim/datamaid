@@ -1,206 +1,187 @@
-// Replace your existing NavBar.jsx with this improved version
+// src/components/NavBar.jsx
+import React, { useState, useRef } from 'react';
+import { Link } from 'react-router-dom'; // Import Link
+import apiService from '../services/api';
 
-import React, { useState } from 'react';
-import { uploadDataset } from '../services/api';
-
-const NavBar = ({ 
-  onDatasetUploaded, 
-  onEngineChange, 
-  onDatasetChange, 
+const NavBar = ({
   availableDatasets,
+  currentDataset,
   currentEngine = 'pandas',
-  onExport
+  onDatasetUploaded,
+  onEngineChange,
+  onDatasetChange,
+  onExport,
+  onUploadText,
+  onUploadDbFile,
+  isLoading
+  // Removed onRenameRequest, onDeleteRequest props
 }) => {
-  const [uploading, setUploading] = useState(false);
-  const [datasetName, setDatasetName] = useState('');
+  const [csvDatasetName, setCsvDatasetName] = useState('');
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [uploadError, setUploadError] = useState(null);
-  const fileInputRef = React.useRef(null);
+  const [localUploadError, setLocalUploadError] = useState(null);
+  const csvFileInputRef = useRef(null);
+  const dbFileInputRef = useRef(null);
 
-  const handleFileUpload = async (e) => {
+  const handleCsvFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    
-    // Create a dataset name if not provided
-    const name = datasetName || file.name.replace(/\.[^/.]+$/, "");
-    
-    setUploading(true);
-    setUploadError(null);
-    
+
+    const name = csvDatasetName || file.name.replace(/\.[^/.]+$/, "");
+    setLocalUploadError(null);
+
     try {
-      console.log("Starting file upload:", file.name, "size:", file.size);
-      const result = await uploadDataset(file, name);
-      console.log("Upload successful:", result);
-      
+      const result = await apiService.uploadDataset(file, name);
       onDatasetUploaded(result);
-      
-      // Reset the file input and name
-      if (fileInputRef.current) {
-        fileInputRef.current.value = null;
-      }
-      setDatasetName('');
-      
+      if (csvFileInputRef.current) csvFileInputRef.current.value = null;
+      setCsvDatasetName('');
     } catch (error) {
-      console.error('Error uploading file:', error);
-      
-      let errorMessage = 'Failed to upload file. Please try again.';
-      if (error.response && error.response.data) {
-        errorMessage += ` Server says: ${error.response.data.detail || JSON.stringify(error.response.data)}`;
-      } else if (error.message) {
-        errorMessage += ` Error: ${error.message}`;
-      }
-      
-      setUploadError(errorMessage);
-      alert(errorMessage);
-      
-    } finally {
-      setUploading(false);
+      console.error('NavBar CSV Upload failed:', error);
+      const message = error.response?.data?.detail || error.message || 'CSV Upload failed';
+      setLocalUploadError(message);
     }
   };
 
-  const handleEngineChange = (e) => {
-    const newEngine = e.target.value;
-    onEngineChange(newEngine);
-  };
-
-  const handleDatasetSelect = (e) => {
-    const dataset = e.target.value;
-    if (dataset) {
-      onDatasetChange(dataset);
+  const handleDbFileUploadTrigger = (e) => {
+    const file = e.target.files[0];
+    if (file && onUploadDbFile) {
+      onUploadDbFile(file);
+      if (dbFileInputRef.current) dbFileInputRef.current.value = null;
     }
   };
 
-  const handleExport = (format) => {
-    onExport(format);
-    setShowExportMenu(false);
-  };
+  const handleEngineChange = (e) => onEngineChange(e.target.value);
+  const handleDatasetSelect = (e) => onDatasetChange(e.target.value);
+  const handleExportClick = (format) => { onExport(format); setShowExportMenu(false); };
 
   return (
-    <nav className="bg-gray-800 p-4">
-      <div className="max-w-7xl mx-auto px-4">
-        <div className="flex flex-wrap justify-between items-center">
-          <div className="flex items-center">
-            <span className="text-white text-lg font-semibold mr-4">
-              Data Analysis GUI
+    <nav className="bg-coffee bg-opacity-85 p-3 sticky top-0 z-30 shadow-md border-b border-coffee-light">
+      <div className="max-w-full mx-auto px-2 sm:px-4">
+        <div className="flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
+          {/* Left Side: Title & Logo */}
+          <div className="flex items-center flex-shrink-0">
+            <span className="text-maid-cream-light text-xl font-bold mr-2">
+              DataMaid
             </span>
-            
-            <div className="hidden md:flex items-center space-x-1">
-              <a 
-                href="https://github.com/yourusername/data-analysis-gui" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="px-3 py-2 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
-              >
-                GitHub
-              </a>
-              <a 
-                href="/docs" 
-                className="px-3 py-2 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
-              >
-                Documentation
-              </a>
-            </div>
+            <span className="text-maid-cream-light text-sm opacity-80">♡</span>
           </div>
-          
-          <div className="flex flex-wrap items-center space-x-2 mt-2 md:mt-0">
+
+          {/* Right Side: Controls */}
+          <div className="flex flex-wrap items-center justify-end flex-grow gap-x-3 gap-y-2">
             {/* Dataset selector */}
             {availableDatasets && availableDatasets.length > 0 && (
               <select
-                className="bg-gray-700 text-white rounded px-3 py-1.5 max-w-xs"
+                className="bg-white bg-opacity-95 text-maid-choco rounded-md px-3 py-1.5 max-w-xs text-sm focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
                 onChange={handleDatasetSelect}
+                value={currentDataset || ""}
+                disabled={isLoading}
+                title={currentDataset || "Select Dataset"}
               >
                 <option value="">Select Dataset</option>
-                {availableDatasets.map((dataset, index) => (
-                  <option key={index} value={dataset}>{dataset}</option>
+                {availableDatasets.map((dataset) => (
+                  <option key={dataset} value={dataset}>{dataset}</option>
                 ))}
               </select>
             )}
-            
+
             {/* Engine selector */}
             <select
-              className="bg-gray-700 text-white rounded px-3 py-1.5"
+              className="bg-white bg-opacity-95 text-maid-choco rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
               value={currentEngine}
               onChange={handleEngineChange}
+              disabled={isLoading}
             >
               <option value="pandas">Pandas</option>
               <option value="polars">Polars</option>
               <option value="sql">SQL</option>
             </select>
-            
+
             {/* Export dropdown */}
             <div className="relative">
-              <button 
-                className="bg-gray-700 text-white rounded px-3 py-1.5 flex items-center"
+              <button
+                className="btn-nav btn-coffee flex items-center"
                 onClick={() => setShowExportMenu(!showExportMenu)}
+                disabled={!currentDataset || isLoading}
+                title="Export current dataset state"
               >
                 Export
-                <svg className="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
+                <svg className="w-3 h-3 ml-1 fill-current" viewBox="0 0 20 20"><path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" /></svg>
               </button>
-              
               {showExportMenu && (
-                <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white z-10">
-                  <div className="py-1">
-                    <button
-                      className="block w-full text-left px-4 py-2 text-gray-700 hover:bg-gray-100"
-                      onClick={() => handleExport('csv')}
-                    >
-                      Export as CSV
-                    </button>
-                    <button
-                      className="block w-full text-left px-4 py-2 text-gray-700 hover:bg-gray-100"
-                      onClick={() => handleExport('json')}
-                    >
-                      Export as JSON
-                    </button>
-                    <button
-                      className="block w-full text-left px-4 py-2 text-gray-700 hover:bg-gray-100"
-                      onClick={() => handleExport('excel')}
-                    >
-                      Export as Excel
-                    </button>
-                  </div>
+                <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-coffee-light ring-opacity-5 z-40 py-1 border border-maid-gray-light">
+                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('csv')}>Export as CSV</button>
+                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('json')}>Export as JSON</button>
+                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('excel')}>Export as Excel</button>
                 </div>
               )}
             </div>
-            
-            {/* File upload */}
-            <div className="relative inline-block">
-              <input
-                type="text"
-                placeholder="Dataset name (optional)"
-                className="bg-gray-700 text-white rounded px-3 py-1.5"
-                value={datasetName}
-                onChange={(e) => setDatasetName(e.target.value)}
-              />
-            </div>
-            
-            <div className="relative inline-block">
-              <input
-                type="file"
-                id="file-upload"
-                ref={fileInputRef}
-                accept=".csv"
-                onChange={handleFileUpload}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                disabled={uploading}
-              />
-              <label
-                htmlFor="file-upload"
-                className={`bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded cursor-pointer ${
-                  uploading ? 'opacity-50 cursor-not-allowed' : ''
-                }`}
-              >
-                {uploading ? 'Uploading...' : 'Upload CSV'}
-              </label>
+
+            {/* Upload Area Group */}
+            <div className="flex items-center space-x-2 border-l border-coffee-light border-opacity-50 pl-3 ml-1">
+                {/* CSV Upload */}
+                <div className="flex items-center space-x-1">
+                    <input
+                        type="text"
+                        placeholder="CSV Name (opt.)"
+                        className="bg-white bg-opacity-95 text-maid-choco rounded-md px-2 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
+                        value={csvDatasetName}
+                        onChange={(e) => setCsvDatasetName(e.target.value)}
+                        disabled={isLoading}
+                        title="Optional name for uploaded CSV"
+                    />
+                    <div className="relative inline-block">
+                        <input
+                           type="file" id="csv-file-upload" ref={csvFileInputRef} accept=".csv"
+                           onChange={handleCsvFileUpload}
+                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                           disabled={isLoading}
+                        />
+                        <label htmlFor="csv-file-upload" className={`btn-nav btn-blue whitespace-nowrap ${isLoading ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                           Upload CSV
+                        </label>
+                    </div>
+                </div>
+
+                {/* Text Paste Button */}
+                <button
+                    onClick={onUploadText}
+                    className="btn-nav btn-green whitespace-nowrap"
+                    disabled={isLoading}
+                    title="Load data by pasting text (CSV or JSON)"
+                >
+                    Paste Text
+                </button>
+
+                {/* DB Upload Button */}
+                <div className="relative inline-block">
+                    <input
+                        type="file" id="db-file-upload" ref={dbFileInputRef}
+                        accept=".db,.sqlite,.sqlite3,.duckdb"
+                        onChange={handleDbFileUploadTrigger}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        disabled={isLoading}
+                    />
+                    <label htmlFor="db-file-upload" className={`btn-nav btn-purple whitespace-nowrap ${isLoading ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                        Upload DB
+                    </label>
+                </div>
+                <div className="border-l border-coffee-light border-opacity-50 pl-3 ml-1">
+                    <Link
+                       to="/manage-datasets"
+                       className="btn-nav btn-outline whitespace-nowrap"
+                       title="Rename or delete datasets"
+                    >
+                       Manage Datasets
+                   </Link>
+               </div>
             </div>
           </div>
         </div>
-        
-        {uploadError && (
-          <div className="mt-2 p-2 bg-red-100 text-red-700 text-sm rounded">
-            {uploadError}
+
+        {/* Local Upload Error Display */}
+        {localUploadError && (
+          <div className="mt-2 p-1.5 bg-red-100 text-red-700 text-xs rounded flex justify-between items-center">
+            <span>Upload Error: {localUploadError}</span>
+            <button onClick={() => setLocalUploadError(null)} className="ml-2 font-bold text-red-800 text-xs">✕</button>
           </div>
         )}
       </div>

@@ -1,17 +1,175 @@
+/* src/styles/index.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@layer base {
+  /* Import Nunito font - ensure this is linked in your public/index.html */
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap');
+
+  body {
+    @apply bg-maid-cream-light font-sans text-maid-choco antialiased;
+  }
+
+  /* Basic input/select focus styling */
+  input:focus,
+  select:focus,
+  textarea:focus {
+    @apply outline-none ring-2 ring-coffee-light ring-opacity-40 border-coffee-light;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-maid-cream rounded-full;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-coffee-light rounded-full border-2 border-maid-cream-light hover:bg-coffee;
+  }
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+@layer components {
+  /* --- Buttons --- */
+  .btn {
+    @apply px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-60 disabled:cursor-not-allowed transition-all duration-150 ease-in-out shadow-soft focus:outline-none focus:ring-2 focus:ring-offset-1;
+  }
+  .btn-pink {
+    @apply bg-maid-pink text-maid-choco hover:bg-maid-pink-dark focus:ring-maid-pink;
+  }
+  .btn-coffee {
+    @apply bg-coffee text-white hover:bg-coffee-dark focus:ring-coffee;
+  }
+  .btn-blue {
+    @apply bg-maid-blue text-maid-choco-dark hover:bg-maid-blue-dark focus:ring-maid-blue;
+  }
+  .btn-green {
+    @apply bg-green-300 text-maid-choco-dark hover:bg-green-400 focus:ring-green-300;
+  }
+  .btn-purple {
+    @apply bg-purple-300 text-maid-choco-dark hover:bg-purple-400 focus:ring-purple-300;
+  }
+  .btn-red {
+    @apply bg-red-300 text-maid-choco-dark hover:bg-red-400 focus:ring-red-300;
+  }
+  .btn-yellow {
+    @apply bg-yellow-200 text-maid-choco-dark hover:bg-yellow-300 focus:ring-yellow-200;
+  }
+  .btn-gray {
+    @apply bg-maid-gray hover:bg-maid-gray-dark text-maid-choco focus:ring-maid-gray-dark;
+  }
+  .btn-outline {
+    @apply bg-transparent border border-coffee text-coffee hover:bg-coffee-light hover:bg-opacity-20 focus:ring-coffee;
+  }
+
+  /* --- Navbar Buttons --- */
+  .btn-nav {
+    @apply px-3 py-1.5 rounded-md font-medium text-xs sm:text-sm disabled:opacity-60 transition-colors duration-150 focus:outline-none focus:ring-1 focus:ring-offset-1 focus:ring-offset-coffee-light;
+  }
+  .btn-nav.btn-blue { @apply bg-maid-blue-light text-maid-choco hover:bg-maid-blue focus:ring-maid-blue; }
+  .btn-nav.btn-green { @apply bg-green-200 text-maid-choco-dark hover:bg-green-300 focus:ring-green-300; }
+  .btn-nav.btn-purple { @apply bg-purple-200 text-maid-choco-dark hover:bg-purple-300 focus:ring-purple-300; }
+  .btn-nav.btn-gray { @apply bg-maid-gray hover:bg-maid-gray-dark text-maid-choco focus:ring-maid-gray-dark; }
+  .btn-nav.btn-coffee { @apply bg-coffee-light hover:bg-coffee text-white focus:ring-coffee; }
+  .btn-nav:disabled { @apply cursor-not-allowed; }
+  input[type="file"]:disabled + label.btn-nav {
+    @apply opacity-60 cursor-not-allowed;
+  }
+
+  /* --- Panels/Cards --- */
+  .card {
+    @apply bg-white rounded-lg shadow-soft p-4 border border-maid-gray-light;
+  }
+  .card-header {
+    @apply text-lg font-semibold text-maid-choco-dark mb-3 pb-2 border-b border-maid-gray;
+  }
+  .card-inset {
+    @apply bg-maid-cream-light p-3 rounded-md border border-maid-gray;
+  }
+
+  /* --- Form Elements --- */
+  .input-base {
+    @apply w-full border border-maid-gray rounded-md p-2 text-sm text-maid-choco focus:border-coffee-light focus:ring-1 focus:ring-coffee-light shadow-inner transition-colors duration-150;
+  }
+  .select-base {
+    @apply w-full border border-maid-gray rounded-md p-2 pr-8 text-sm text-maid-choco bg-white focus:border-coffee-light focus:ring-1 focus:ring-coffee-light shadow-inner transition-colors duration-150 appearance-none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b5c41' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1.5em 1.5em;
+  }
+  textarea.input-base {
+    @apply font-mono text-xs;
+  }
+  label.input-label {
+    @apply block text-xs font-semibold text-maid-choco mb-1;
+  }
+
+  /* --- Data Table --- */
+  .table-header {
+    @apply px-4 py-2 text-left text-xs font-bold text-maid-choco-dark uppercase tracking-wider sticky top-0 bg-maid-cream-light border-b-2 border-coffee-light border-opacity-40 hover:bg-maid-cream transition-colors duration-150 cursor-pointer;
+  }
+  .table-cell {
+    @apply px-4 py-2 whitespace-nowrap text-sm text-maid-choco border-b border-maid-gray-light;
+  }
+  .table-row-alt {
+    @apply bg-maid-cream-light bg-opacity-30;
+  }
+  .table-row:hover .table-cell {
+    @apply bg-coffee-light bg-opacity-10;
+  }
+
+  /* --- Code Display & Editor --- */
+  .code-block {
+    @apply rounded-md shadow-inner overflow-hidden;
+  }
+  .code-header {
+    @apply flex justify-between items-center bg-coffee-dark text-maid-cream-light px-4 py-1.5 rounded-t-md;
+  }
+  .code-header h3 {
+    @apply text-sm font-semibold;
+  }
+  .code-copy-button {
+    @apply px-2 py-0.5 text-xs bg-maid-cream text-coffee-dark rounded-md hover:bg-white;
+  }
+  .syntax-highlighter-container {
+    @apply !m-0 !p-3 !rounded-b-md;
+  }
+  .code-editor-textarea {
+    @apply w-full h-60 p-3 font-mono text-sm focus:outline-none resize-y block border border-maid-gray rounded-md text-maid-choco shadow-inner;
+  }
+  .code-editor-toolbar {
+    @apply flex justify-between items-center mb-2 pb-2 border-b border-maid-gray;
+  }
+  .code-editor-title {
+    @apply text-lg font-semibold text-maid-choco-dark;
+  }
+  .code-snippets-panel {
+    @apply mb-4 p-3 border border-maid-gray rounded-md bg-maid-cream-light max-h-60 overflow-y-auto;
+  }
+  .snippet-item {
+    @apply p-2 border border-maid-gray-light rounded-md cursor-pointer hover:bg-coffee-light hover:bg-opacity-20 bg-white shadow-sm;
+  }
+  .snippet-name { @apply font-medium text-sm text-coffee; }
+  .snippet-desc { @apply text-xs text-maid-choco mt-1; }
+
+  /* --- Modals --- */
+  .modal-overlay {
+    @apply fixed inset-0 bg-maid-choco bg-opacity-30 flex items-center justify-center z-50 backdrop-blur-sm;
+  }
+  .modal-content {
+    @apply bg-white rounded-xl shadow-soft-lg p-6 m-4 max-w-xl w-full transform transition-all duration-300 scale-100 border border-coffee-light border-opacity-20;
+  }
+  .modal-header {
+    @apply text-lg font-semibold text-maid-choco-dark mb-4;
+  }
+  .modal-close-button {
+    @apply absolute top-3 right-3 text-maid-gray hover:text-maid-choco text-2xl font-bold leading-none;
+  }
+
+  /* Helper button classes */
+  .btn-indigo {
+    @apply bg-purple-300 hover:bg-purple-400 text-maid-choco-dark focus:ring-purple-300;
+  }
 }

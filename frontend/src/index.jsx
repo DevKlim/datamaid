@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import './styles/index.css';
+import './styles/index.css'; // Ensure Tailwind styles are imported
 import App from './App';
 import { Route } from 'react-router-dom';
 // import { BrowserRouter, Routes } from 'react-router-dom'

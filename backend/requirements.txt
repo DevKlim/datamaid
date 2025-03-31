@@ -29,6 +29,7 @@
 
 # backend/requirements.txt
 # Using versions from install.sh for consistency, ensure compatibility
+pyarrow
 fastapi>=0.95.0,<1.0.0 # Keep <1.0 if using Pydantic v1 extensively
 uvicorn[standard]>=0.22.0,<0.24.0 # Use [standard] for better performance
 pydantic>=1.10.8,<2.0.0 # Pin Pydantic v1 if needed for FastAPI < 1.0
@@ -38,7 +39,6 @@ duckdb>=0.8.0,<1.3.0
 python-multipart>=0.0.6
 numpy>=1.24.0,<2.0.0 # Pandas dependency, pin lower than 2.0 for broader compat
 typing-extensions>=4.6.0 # Often needed by pydantic/fastapi
-
 # Optional but recommended:
 gunicorn
 python-dotenv # For managing environment variables if needed later
