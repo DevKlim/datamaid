@@ -1,6 +1,7 @@
 # backend/app/services/pandas_service.py
 import pandas as pd
 import io
+import numpy as np
 import re # Import re for regex operations
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -905,3 +906,130 @@ def apply_pandas_regex(df: pd.DataFrame, operation: str, params: Dict[str, Any])
          raise ValueError(f"Error during regex '{operation}': {e}")
 
     return result_df, code
+
+def generate_pandas_code_snippet(operation: str, params: Dict[str, Any], df_var: str = "df") -> str:
+    """Generates a single line/snippet of pandas code for a given operation."""
+    # --- This function needs to be implemented based on apply_pandas_operation logic ---
+    # Example for filter:
+    if operation == "filter":
+        col = params['column']
+        op = params['operator']
+        val = params['value']
+        # Basic example, needs proper quoting/type handling like in apply_pandas_operation
+        if isinstance(val, str): val = f"'{val}'"
+        op_map = {"==": "==", "!=": "!=", ">": ">", "<": "<", ">=": ">=", "<=": "<="} # etc.
+        if op in op_map:
+             return f"{df_var} = {df_var}[{df_var}['{col}'] {op_map[op]} {val}]"
+        # Add other operations (select, groupby, rename, drop, merge etc.)
+        # For merge: needs left/right df names passed in
+        elif operation == "merge":
+             right_df_name = params.get("right_dataset_name", "df_right") # Need to pass this
+             left_on = params['left_on']
+             right_on = params['right_on']
+             how = params.get('join_type', 'inner')
+             return f"{df_var} = pd.merge({df_var}, {right_df_name}, left_on='{left_on}', right_on='{right_on}', how='{how}')"
+        # ... other operations
+        else:
+             # Fallback or raise error
+             return f"# Pandas code for {operation} with params {params}"
+    elif operation == "custom_code":
+        return str(params) # params is the code itself
+    # Add other operations...
+    else:
+        return f"# TODO: Implement pandas code snippet for {operation}"
+
+
+def replay_pandas_operations(original_content: bytes, history: List[Dict[str, Any]]) -> Tuple[bytes, str]:
+    """
+    Replays a list of pandas operations from the original content.
+    Returns the final content (bytes) and the cumulative code string.
+    """
+    if not history:
+        return original_content, "# No operations applied"
+
+    try:
+        current_df = pd.read_csv(io.BytesIO(original_content))
+    except Exception as e:
+        raise ValueError(f"Failed to load original data for replay: {e}")
+
+    cumulative_code_lines = ["import pandas as pd", "import io", "import numpy as np", "# Load initial data (replace with actual loading if needed)"]
+    # Simulate loading - in real script, user would load their CSV
+    # We don't include the actual read_csv in the *generated* script usually
+    # cumulative_code_lines.append(f"df = pd.read_csv(io.BytesIO(original_content_placeholder))")
+
+    # Placeholder for merge operations needing the right dataframe
+    loaded_dataframes = {"df": current_df} # Tracks df variables
+
+    for i, step in enumerate(history):
+        op = step["operation"]
+        params = step["params_or_code"]
+        df_var = "df" # Assume we operate on 'df' unless it's a merge result
+
+        code_snippet = ""
+        try:
+            # Handle merge specifically - needs the right df loaded
+            if op == 'merge':
+                right_dataset_name = params.get("right_dataset") # Name from UI params
+                if not right_dataset_name: raise ValueError("Merge step missing 'right_dataset' name in history params.")
+                # We assume the right dataset's *original* content is needed
+                # This is a simplification - ideally, we'd replay the right dataset's history too!
+                # For now, let's assume the user merges with another *original* dataset available in `datasets`
+                # This requires access to the main `datasets` dict - pass it in? Or handle in main.py?
+                # Let's assume main.py pre-loads required merge DFs into loaded_dataframes
+                right_df_var = f"df_{right_dataset_name}"
+                if right_df_var not in loaded_dataframes:
+                    raise ValueError(f"Right dataframe '{right_dataset_name}' for merge step {i+1} not pre-loaded.")
+
+                # Generate snippet with correct variable names
+                step_params_for_snippet = params.copy()
+                step_params_for_snippet["right_dataset_name"] = right_df_var # Pass variable name
+                code_snippet = generate_pandas_code_snippet(op, step_params_for_snippet, df_var="df") # Apply merge to 'df'
+
+                # Apply the operation to the actual DataFrame
+                current_df = pd.merge(
+                    loaded_dataframes[df_var],
+                    loaded_dataframes[right_df_var],
+                    left_on=params['left_on'],
+                    right_on=params['right_on'],
+                    how=params.get('join_type', 'inner')
+                )
+                loaded_dataframes[df_var] = current_df # Update 'df' variable
+
+            elif op == 'custom_code':
+                 code_snippet = str(params) # The code is the param
+                 local_vars = {'df': current_df, 'pd': pd, 'np': np, 'io': io}
+                 exec(code_snippet, local_vars)
+                 current_df = local_vars.get('df')
+                 if not isinstance(current_df, pd.DataFrame):
+                     raise ValueError(f"Custom code at step {i+1} did not produce a pandas DataFrame named 'df'.")
+                 loaded_dataframes[df_var] = current_df
+
+            else:
+                # Generate snippet for this step
+                code_snippet = generate_pandas_code_snippet(op, params, df_var="df")
+                # Apply the operation using the existing single-step logic (or re-implement here)
+                # For simplicity, let's re-apply using exec with the snippet (less safe, but mirrors code)
+                local_vars = {'df': current_df, 'pd': pd, 'np': np, 'io': io}
+                exec(code_snippet, local_vars)
+                current_df = local_vars.get('df')
+                if not isinstance(current_df, pd.DataFrame):
+                     raise ValueError(f"Operation '{op}' at step {i+1} did not produce a pandas DataFrame.")
+                loaded_dataframes[df_var] = current_df
+
+
+            cumulative_code_lines.append(code_snippet)
+            step["generated_code_snippet"] = code_snippet # Store the snippet back in history entry
+
+        except Exception as e:
+            raise ValueError(f"Error replaying pandas step {i+1} ({op}): {e}\nCode: {code_snippet}")
+
+    # Convert final DataFrame back to bytes
+    try:
+        with io.BytesIO() as buffer:
+            current_df.to_csv(buffer, index=False)
+            final_content = buffer.getvalue()
+    except Exception as e:
+        raise ValueError(f"Failed to serialize final pandas DataFrame: {e}")
+
+    cumulative_code = "\n".join(cumulative_code_lines)
+    return final_content, cumulative_code

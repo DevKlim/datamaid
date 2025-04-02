@@ -2,6 +2,7 @@
 import polars as pl
 import polars.selectors as cs # Import selectors for convenience
 import io
+import numpy as np
 import re # Import re for regex
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -886,3 +887,114 @@ def apply_polars_regex(df: pl.DataFrame, operation: str, params: Dict[str, Any])
          raise ValueError(f"Error during polars regex '{operation}': {e}")
 
     return result_df, code
+
+def generate_polars_code_snippet(operation: str, params: Dict[str, Any], df_var: str = "df") -> str:
+    """Generates a single line/snippet of polars code for a given operation."""
+    # --- Implement based on apply_polars_operation logic ---
+    if operation == "filter":
+        col = params['column']
+        op = params['operator']
+        val = params['value']
+        # Basic example, needs proper quoting/type handling
+        op_map = {"==": "eq", "!=": "neq", ">": "gt", "<": "lt", ">=": "gt_eq", "<=": "lt_eq"} # etc.
+        if op in op_map:
+            lit_val = f"pl.lit({repr(val)})" # Use repr for literal representation
+            return f"{df_var} = {df_var}.filter(pl.col('{col}').{op_map[op]}({lit_val}))"
+        # Add other operations (select, groupby, rename, drop, join etc.)
+        elif operation == "join": # Polars uses join
+             right_df_name = params.get("right_dataset_name", "df_right")
+             left_on = params['left_on']
+             right_on = params['right_on']
+             how = params.get('join_type', 'inner')
+             return f"{df_var} = {df_var}.join({right_df_name}, left_on='{left_on}', right_on='{right_on}', how='{how}')"
+        # ... other operations
+        else:
+             return f"# Polars code for {operation} with params {params}"
+    elif operation == "custom_code":
+        return str(params)
+    # Add other operations...
+    else:
+        return f"# TODO: Implement polars code snippet for {operation}"
+
+
+def replay_polars_operations(original_content: bytes, history: List[Dict[str, Any]]) -> Tuple[bytes, str]:
+    """
+    Replays a list of polars operations from the original content.
+    Returns the final content (bytes) and the cumulative code string.
+    """
+    if not history:
+        return original_content, "# No operations applied"
+
+    try:
+        # Use scan_csv for potentially better performance? Or read_csv is fine.
+        current_df = pl.read_csv(io.BytesIO(original_content))
+    except Exception as e:
+        raise ValueError(f"Failed to load original data for Polars replay: {e}")
+
+    cumulative_code_lines = ["import polars as pl", "import io", "# Load initial data (replace with actual loading if needed)"]
+    # cumulative_code_lines.append(f"df = pl.read_csv(io.BytesIO(original_content_placeholder))")
+
+    loaded_dataframes = {"df": current_df}
+
+    for i, step in enumerate(history):
+        op = step["operation"]
+        params = step["params_or_code"]
+        df_var = "df"
+
+        code_snippet = ""
+        try:
+            if op == 'join': # Polars uses join
+                right_dataset_name = params.get("right_dataset")
+                if not right_dataset_name: raise ValueError("Join step missing 'right_dataset' name.")
+                right_df_var = f"df_{right_dataset_name}"
+                if right_df_var not in loaded_dataframes:
+                     raise ValueError(f"Right dataframe '{right_dataset_name}' for join step {i+1} not pre-loaded.")
+
+                step_params_for_snippet = params.copy()
+                step_params_for_snippet["right_dataset_name"] = right_df_var
+                code_snippet = generate_polars_code_snippet(op, step_params_for_snippet, df_var="df")
+
+                current_df = current_df.join(
+                    loaded_dataframes[right_df_var],
+                    left_on=params['left_on'],
+                    right_on=params['right_on'],
+                    how=params.get('join_type', 'inner')
+                )
+                loaded_dataframes[df_var] = current_df
+
+            elif op == 'custom_code':
+                 code_snippet = str(params)
+                 local_vars = {'df': current_df, 'pl': pl, 'io': io}
+                 # Polars often uses expression API, exec might be less common, but possible
+                 exec(code_snippet, local_vars)
+                 current_df = local_vars.get('df')
+                 if not isinstance(current_df, pl.DataFrame):
+                     raise ValueError(f"Custom code at step {i+1} did not produce a Polars DataFrame named 'df'.")
+                 loaded_dataframes[df_var] = current_df
+
+            else:
+                code_snippet = generate_polars_code_snippet(op, params, df_var="df")
+                # Apply using exec (simpler for replay, less safe)
+                local_vars = {'df': current_df, 'pl': pl, 'io': io}
+                exec(code_snippet, local_vars)
+                current_df = local_vars.get('df')
+                if not isinstance(current_df, pl.DataFrame):
+                     raise ValueError(f"Operation '{op}' at step {i+1} did not produce a Polars DataFrame.")
+                loaded_dataframes[df_var] = current_df
+
+            cumulative_code_lines.append(code_snippet)
+            step["generated_code_snippet"] = code_snippet
+
+        except Exception as e:
+            raise ValueError(f"Error replaying polars step {i+1} ({op}): {e}\nCode: {code_snippet}")
+
+    # Convert final DataFrame back to bytes
+    try:
+        with io.BytesIO() as buffer:
+            current_df.write_csv(buffer)
+            final_content = buffer.getvalue()
+    except Exception as e:
+        raise ValueError(f"Failed to serialize final polars DataFrame: {e}")
+
+    cumulative_code = "\n".join(cumulative_code_lines)
+    return final_content, cumulative_code
