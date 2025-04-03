@@ -430,6 +430,27 @@ export const performOperation = async (datasetName, operation, params) => {
   }
 };
 
+export const applyStructuredOperation = async (datasetName, operation, params, engine) => {
+  if (!datasetName) throw new Error("Dataset name is required.");
+
+  const formData = new FormData();
+  formData.append('operation', operation);
+  formData.append('params_json', JSON.stringify(params)); // Send params as JSON string
+  formData.append('engine', engine);
+
+  try {
+    const response = await api.post(`/apply-operation/${encodeURIComponent(datasetName)}`, formData, {
+       headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    // Expects { message, dataset_name, data, columns, row_count, can_undo, can_reset, generated_code }
+    return response.data;
+  } catch (error) {
+    console.error(`Error applying structured operation ${operation} on ${datasetName} with ${engine}:`, error);
+    throw error;
+  }
+};
+
+
 
 // --- Consolidate Exported Functions ---
 const apiService = {
@@ -447,9 +468,9 @@ const apiService = {
   // Info/Stats
   getDatasetInfo,
   getColumnStats,
-  // Execution & RA & UI Ops
+  // Execution & RA & Operations
   executeCustomCode,
-  performOperation, // <-- Added back
+  applyStructuredOperation, // <-- New function
   performRelationalOperationPreview,
   saveRaResult,
   // State Management

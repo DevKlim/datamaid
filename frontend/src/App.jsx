@@ -193,28 +193,30 @@ function App() {
 
   // --- Handler for Operations Panel ---
   const handleOperationSubmit = async (operation, params) => {
-    console.log("App.jsx: handleOperationSubmit called with:", operation, params);
+    console.log("App.jsx: handleOperationSubmit called with:", operation, params, "Engine:", engine); // Log engine
     if (!currentViewName) {
-        handleError("Please select a dataset first.");
-        return;
+      handleError("Please select a dataset first.");
+      return;
     }
     setIsLoading(true); clearError();
-    setLastExecutedCode(''); // Clear previous code display
 
     try {
-      // Call the specific API for structured operations
-      const result = await apiService.performOperation(currentViewName, operation, params);
+      // Use the NEW endpoint and pass the engine
+      const result = await apiService.applyStructuredOperation(
+          currentViewName,
+          operation,
+          params, // apiService will stringify
+          engine // Pass the current engine state
+      );
       console.log("Operation result:", result);
 
-      // Update the view state with the result of the operation
-      // The result should contain the updated data preview, columns, etc.
-      updateViewState(result, currentViewName); // Pass currentViewName for validation
+      // Update view state based on the result
+      updateViewState(result, currentViewName); // Update view with new state
+      // Update the list of datasets if it changed (e.g., merge creating new?) - unlikely for ops panel
+      // fetchDatasetsList(); // Maybe not needed here unless ops can create datasets
 
-      console.log(`Operation '${operation}' applied successfully to '${currentViewName}'.`);
-      // Optionally display the generated code snippet
-      if (result.generated_code) {
-          setLastExecutedCode(result.generated_code);
-      }
+      // Store generated code/snippet if needed for display
+      setLastExecutedCode(result.generated_code || '');
 
     } catch (err) {
       handleError(err, `Failed to apply operation '${operation}'.`);
