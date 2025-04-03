@@ -2,6 +2,7 @@
 import pandas as pd
 import io
 import numpy as np
+import traceback
 import re # Import re for regex operations
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -50,8 +51,6 @@ def apply_pandas_operation(df: pd.DataFrame, operation: str, params: Dict[str, A
             return _set_index_pd(df, params)
         elif operation == "reset_index":
             return _reset_index_pd(df, params)
-
-        # --- NEW Operations ---
         elif operation == "fillna":
             return _fillna_pd(df, params)
         elif operation == "dropna":
@@ -70,6 +69,8 @@ def apply_pandas_operation(df: pd.DataFrame, operation: str, params: Dict[str, A
              return _window_function_pd(df, params)
         elif operation == "sample":
              return _sample_pd(df, params)
+        elif operation == "apply_lambda":
+             return _apply_lambda_pd(df, params)
         # Regex ops handled by apply_pandas_regex, called from main.py's /regex-operation
         # Add other specific ops here if needed
 
@@ -1033,3 +1034,46 @@ def replay_pandas_operations(original_content: bytes, history: List[Dict[str, An
 
     cumulative_code = "\n".join(cumulative_code_lines)
     return final_content, cumulative_code
+
+
+def _apply_lambda_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    """Applies a lambda function defined as a string to a column."""
+    column = params.get("column")
+    lambda_str = params.get("lambda_str")
+    new_column_name = params.get("new_column_name") # Optional
+
+    if not column or not lambda_str:
+        raise ValueError("apply_lambda requires 'column' and 'lambda_str' parameters.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found for apply_lambda.")
+
+    # Basic validation of lambda string (very limited)
+    if not lambda_str.strip().startswith("lambda"):
+        raise ValueError("lambda_str must start with 'lambda'.")
+
+    result_df = df.copy()
+    target_column = new_column_name if new_column_name else column
+    code = f"# Apply lambda function to column '{column}'\n"
+    # Ensure necessary imports might be available in the lambda context (pd, np)
+    code += f"# Make sure 'pd' and 'np' are available if used in the lambda\n"
+    code += f"lambda_func = {lambda_str}\n" # Show the lambda definition
+    code += f"df['{target_column}'] = df['{column}'].apply(lambda_func)"
+
+    try:
+        # --- SECURITY WARNING: Using eval is risky! ---
+        # Create the actual lambda function from the string
+        # Provide pandas and numpy in the eval context for convenience
+        lambda_func = eval(lambda_str, {"pd": pd, "np": np})
+
+        # Apply the lambda function
+        result_df[target_column] = result_df[column].apply(lambda_func)
+
+    except SyntaxError as se:
+        raise ValueError(f"Invalid lambda function syntax: {se}") from se
+    except Exception as e:
+        # Catch errors during lambda execution (e.g., TypeError on incompatible data)
+        print(f"Error executing lambda on column '{column}': {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise ValueError(f"Error applying lambda to column '{column}': {e}. Check function logic and column data type.") from e
+
+    return result_df, code

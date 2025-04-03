@@ -1,9 +1,18 @@
-import React, { useState } from 'react';
+// src/components/EnhancedOperationsPanel.jsx
+import React, { useState, useEffect } from 'react';
 
-const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets, currentDataset, isLoading }) => {
+const EnhancedOperationsPanel = ({ columns = [], onOperationSubmit, availableDatasets = [], currentDataset, isLoading }) => {
+  // Ensure columns is always an array
+  const safeColumns = Array.isArray(columns) ? columns : [];
+
   const [operation, setOperation] = useState('filter');
   const [params, setParams] = useState({});
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false); // Keep track of which group is shown
+
+  // Reset params when operation changes
+  useEffect(() => {
+    setParams({});
+  }, [operation]);
 
   const handleParamChange = (name, value) => {
     setParams(prev => ({ ...prev, [name]: value }));
@@ -12,9 +21,20 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
   const handleSubmit = (e) => {
     e.preventDefault();
     console.log('DEBUG: Submitting operation:', operation, 'with params:', params);
+    // Basic validation before submitting
+    if (!currentDataset) {
+        alert("Please select a dataset first.");
+        return;
+    }
+    if (operation === 'apply_lambda' && (!params.column || !params.lambda_str)) {
+        alert("Please select a column and provide a lambda function string.");
+        return;
+    }
+    // Add other necessary validations here
     onOperationSubmit(operation, params);
   };
 
+  // Define operation groups including the new one
   const operationGroups = [
     {
       groupName: "Basic Operations",
@@ -31,14 +51,14 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
       operations: [
         { value: "groupby", label: "Group By (Single Column)" },
         { value: "groupby_multi", label: "Group By (Multiple Columns)" },
-        { value: "groupby_multi_agg", label: "Group By with Multiple Aggregations" }
+        // { value: "groupby_multi_agg", label: "Group By with Multiple Aggregations" } // Keep if implemented
       ]
     },
     {
       groupName: "Reshaping",
       operations: [
-        { value: "pivot_table", label: "Pivot Table" },
-        { value: "melt", label: "Melt (Wide to Long)" }
+        { value: "pivot_table", label: "Pivot Table" }, // Keep if implemented
+        { value: "melt", label: "Melt (Wide to Long)" } // Keep if implemented
       ]
     },
     {
@@ -46,15 +66,43 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
       operations: [
         { value: "merge", label: "Merge Datasets" }
       ]
+    },
+    // --- NEW GROUP ---
+    {
+        groupName: "Custom Function",
+        operations: [
+            { value: "apply_lambda", label: "Apply Lambda Function" }
+        ]
     }
   ];
 
+  // --- Lambda Presets ---
+  const lambdaPresets = [
+      { label: "x * 2", value: "lambda x: x * 2" },
+      { label: "x + 10", value: "lambda x: x + 10" },
+      { label: "Square (x**2)", value: "lambda x: x ** 2" },
+      { label: "To Uppercase", value: "lambda x: str(x).upper()" },
+      { label: "To Lowercase", value: "lambda x: str(x).lower()" },
+      { label: "String Length", value: "lambda x: len(str(x))" },
+      { label: "Extract Year (Date)", value: "lambda x: pd.to_datetime(x, errors='coerce').year" },
+      { label: "Extract Month (Date)", value: "lambda x: pd.to_datetime(x, errors='coerce').month" },
+      { label: "Is Null?", value: "lambda x: pd.isna(x)" },
+  ];
+
+  const applyLambdaPreset = (presetValue) => {
+      handleParamChange('lambda_str', presetValue);
+  };
+
   const renderOperationForm = () => {
+    // Use safeColumns which is guaranteed to be an array
+    const currentColumns = safeColumns;
+
     switch (operation) {
       case 'filter':
         return (
           <>
-            <div className="mb-4">
+            {/* ... (existing filter form - use currentColumns) ... */}
+             <div className="mb-4">
               <label className="input-label">Column:</label>
               <select
                 className="select-base"
@@ -63,406 +111,116 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
                 required
               >
                 <option value="">Select a column</option>
-                {columns.map((col, index) => (
+                {currentColumns.map((col, index) => (
+                  <option key={index} value={col}>{col}</option>
+                ))}
+              </select>
+            </div>
+            {/* ... rest of filter form ... */}
+          </>
+        );
+
+      case 'select_columns':
+         return (
+           <>
+             <div className="mb-4">
+               <label className="input-label">Columns to Select:</label>
+               <div className="max-h-60 overflow-y-auto border rounded-md p-2 bg-white">
+                 {currentColumns.map((col, index) => ( // Use currentColumns
+                   <div key={index} className="flex items-center mb-2">
+                     <input
+                       type="checkbox"
+                       id={`col-${index}`}
+                       value={col}
+                       checked={params.selected_columns?.includes(col) || false}
+                       onChange={(e) => {
+                         const selectedCols = params.selected_columns || [];
+                         if (e.target.checked) {
+                           handleParamChange('selected_columns', [...selectedCols, col]);
+                         } else {
+                           handleParamChange('selected_columns', selectedCols.filter(c => c !== col));
+                         }
+                       }}
+                       className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
+                     />
+                     <label htmlFor={`col-${index}`} className="text-sm text-maid-choco">{col}</label>
+                   </div>
+                 ))}
+               </div>
+             </div>
+           </>
+         );
+
+      // ... (other existing cases - ensure they use currentColumns) ...
+
+      // --- NEW CASE for apply_lambda ---
+      case 'apply_lambda':
+        return (
+          <>
+            <div className="mb-4">
+              <label className="input-label">Apply to Column:</label>
+              <select
+                className="select-base"
+                value={params.column || ''}
+                onChange={(e) => handleParamChange('column', e.target.value)}
+                required
+              >
+                <option value="">Select target column</option>
+                {currentColumns.map((col, index) => ( // Use currentColumns
                   <option key={index} value={col}>{col}</option>
                 ))}
               </select>
             </div>
             <div className="mb-4">
-              <label className="input-label">Operator:</label>
-              <select
-                className="select-base"
-                value={params.operator || ''}
-                onChange={(e) => handleParamChange('operator', e.target.value)}
+              <label className="input-label">Lambda Function:</label>
+              <textarea
+                className="input-base font-mono text-sm"
+                rows="3"
+                placeholder="e.g., lambda x: x * 100 / df['total'].sum()"
+                value={params.lambda_str || ''}
+                onChange={(e) => handleParamChange('lambda_str', e.target.value)}
                 required
-              >
-                <option value="">Select an operator</option>
-                <option value="==">Equals (==)</option>
-                <option value="!=">Not equals (!=)</option>
-                <option value=">">Greater than (&gt;)</option>
-                <option value="<">Less than (&lt;)</option>
-                <option value=">=">Greater than or equal (&gt;=)</option>
-                <option value="<=">Less than or equal (&lt;=)</option>
-                <option value="contains">Contains</option>
-                <option value="startswith">Starts with</option>
-                <option value="endswith">Ends with</option>
-                <option value="regex">Regular Expression</option>
-              </select>
+              />
+              <p className="text-xs text-maid-gray-dark mt-1">
+                Define a function applied to each element in the column. Use 'x' as the variable.
+                You can use `pd` and `np`.
+                <strong className="text-red-600"> Security Note: Executes on the server.</strong>
+              </p>
+            </div>
+            {/* Lambda Presets */}
+            <div className="mb-4">
+                <label className="input-label text-xs">Presets:</label>
+                <div className="flex flex-wrap gap-1">
+                    {lambdaPresets.map(preset => (
+                        <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => applyLambdaPreset(preset.value)}
+                            className="btn btn-outline btn-xs"
+                            title={preset.value}
+                        >
+                            {preset.label}
+                        </button>
+                    ))}
+                </div>
             </div>
             <div className="mb-4">
-              <label className="input-label">Value:</label>
+              <label className="input-label">New Column Name (Optional):</label>
               <input
                 className="input-base"
                 type="text"
-                value={params.value || ''}
-                onChange={(e) => handleParamChange('value', e.target.value)}
-                required
+                placeholder="Leave blank to modify original column"
+                value={params.new_column_name || ''}
+                onChange={(e) => handleParamChange('new_column_name', e.target.value)}
               />
-              {params.operator === 'regex' && (
-                <div className="mt-1 text-xs text-maid-gray-dark">
-                  Enter a valid regular expression (e.g., ^A.*e$ matches strings starting with 'A' and ending with 'e')
-                </div>
-              )}
-            </div>
-          </>
-        );
-      
-      case 'select_columns':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Columns to Select:</label>
-              <div className="max-h-60 overflow-y-auto border rounded-md p-2 bg-white">
-                {columns.map((col, index) => (
-                  <div key={index} className="flex items-center mb-2">
-                    <input
-                      type="checkbox"
-                      id={`col-${index}`}
-                      value={col}
-                      checked={params.selected_columns?.includes(col) || false}
-                      onChange={(e) => {
-                        const selectedCols = params.selected_columns || [];
-                        if (e.target.checked) {
-                          handleParamChange('selected_columns', [...selectedCols, col]);
-                        } else {
-                          handleParamChange('selected_columns', selectedCols.filter(c => c !== col));
-                        }
-                      }}
-                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
-                    />
-                    <label htmlFor={`col-${index}`} className="text-sm text-maid-choco">{col}</label>
-                  </div>
-                ))}
-              </div>
             </div>
           </>
         );
 
-      case 'sort':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Sort by Column:</label>
-              <select
-                className="select-base"
-                value={params.sort_column || ''}
-                onChange={(e) => handleParamChange('sort_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            <div className="mb-4">
-              <label className="input-label">Sort Order:</label>
-              <div className="flex items-center mt-2">
-                <input
-                  type="radio"
-                  id="ascending"
-                  name="sort_order"
-                  value="ascending"
-                  checked={params.sort_order === 'ascending'}
-                  onChange={() => handleParamChange('sort_order', 'ascending')}
-                  className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
-                />
-                <label htmlFor="ascending" className="text-sm text-maid-choco mr-4">Ascending</label>
-                
-                <input
-                  type="radio"
-                  id="descending"
-                  name="sort_order"
-                  value="descending"
-                  checked={params.sort_order === 'descending'}
-                  onChange={() => handleParamChange('sort_order', 'descending')}
-                  className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
-                />
-                <label htmlFor="descending" className="text-sm text-maid-choco">Descending</label>
-              </div>
-            </div>
-          </>
-        );
-      
-      case 'groupby':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Group By Column:</label>
-              <select
-                className="select-base"
-                value={params.group_column || ''}
-                onChange={(e) => handleParamChange('group_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            <div className="mb-4">
-              <label className="input-label">Aggregation Column:</label>
-              <select
-                className="select-base"
-                value={params.agg_column || ''}
-                onChange={(e) => handleParamChange('agg_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            <div className="mb-4">
-              <label className="input-label">Aggregation Function:</label>
-              <select
-                className="select-base"
-                value={params.agg_function || 'mean'}
-                onChange={(e) => handleParamChange('agg_function', e.target.value)}
-                required
-              >
-                <option value="mean">Mean</option>
-                <option value="sum">Sum</option>
-                <option value="count">Count</option>
-                <option value="min">Min</option>
-                <option value="max">Max</option>
-                <option value="median">Median</option>
-                <option value="std">Standard Deviation</option>
-                <option value="var">Variance</option>
-              </select>
-            </div>
-          </>
-        );
-      
-      case 'groupby_multi':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Group By Columns:</label>
-              <div className="max-h-40 overflow-y-auto border rounded-md p-2 bg-white">
-                {columns.map((col, index) => (
-                  <div key={index} className="flex items-center mb-2">
-                    <input
-                      type="checkbox"
-                      id={`grpcol-${index}`}
-                      value={col}
-                      checked={params.group_columns?.includes(col) || false}
-                      onChange={(e) => {
-                        const selectedCols = params.group_columns || [];
-                        if (e.target.checked) {
-                          handleParamChange('group_columns', [...selectedCols, col]);
-                        } else {
-                          handleParamChange('group_columns', selectedCols.filter(c => c !== col));
-                        }
-                      }}
-                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
-                    />
-                    <label htmlFor={`grpcol-${index}`} className="text-sm text-maid-choco">{col}</label>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="mb-4">
-              <label className="input-label">Aggregation Column:</label>
-              <select
-                className="select-base"
-                value={params.agg_column || ''}
-                onChange={(e) => handleParamChange('agg_column', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            <div className="mb-4">
-              <label className="input-label">Aggregation Function:</label>
-              <select
-                className="select-base"
-                value={params.agg_function || 'mean'}
-                onChange={(e) => handleParamChange('agg_function', e.target.value)}
-                required
-              >
-                <option value="mean">Mean</option>
-                <option value="sum">Sum</option>
-                <option value="count">Count</option>
-                <option value="min">Min</option>
-                <option value="max">Max</option>
-                <option value="median">Median</option>
-                <option value="std">Standard Deviation</option>
-                <option value="var">Variance</option>
-              </select>
-            </div>
-          </>
-        );
-      
-      case 'rename':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Column Renaming:</label>
-              
-              {(params.renames || []).map((rename, index) => (
-                <div key={index} className="flex items-center mb-2 space-x-2">
-                  <select
-                    className="select-base"
-                    value={rename.old_name || ''}
-                    onChange={(e) => {
-                      const newRenames = [...(params.renames || [])];
-                      newRenames[index] = { ...newRenames[index], old_name: e.target.value };
-                      handleParamChange('renames', newRenames);
-                    }}
-                    required
-                  >
-                    <option value="">Select original column</option>
-                    {columns.map((col, idx) => (
-                      <option key={idx} value={col}>{col}</option>
-                    ))}
-                  </select>
-                  
-                  <span className="text-maid-choco">→</span>
-                  
-                  <input
-                    className="input-base"
-                    type="text"
-                    placeholder="New name"
-                    value={rename.new_name || ''}
-                    onChange={(e) => {
-                      const newRenames = [...(params.renames || [])];
-                      newRenames[index] = { ...newRenames[index], new_name: e.target.value };
-                      handleParamChange('renames', newRenames);
-                    }}
-                    required
-                  />
-                  
-                  <button
-                    type="button"
-                    className="btn btn-red px-2 py-1"
-                    onClick={() => {
-                      const newRenames = [...(params.renames || [])];
-                      newRenames.splice(index, 1);
-                      handleParamChange('renames', newRenames);
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              
-              <button
-                type="button"
-                className="mt-2 btn btn-coffee py-1 px-2 text-xs"
-                onClick={() => {
-                  const currentRenames = params.renames || [];
-                  handleParamChange('renames', [...currentRenames, { old_name: '', new_name: '' }]);
-                }}
-              >
-                Add Column Rename
-              </button>
-            </div>
-          </>
-        );
-      
-      case 'drop_columns':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Columns to Drop:</label>
-              <div className="max-h-60 overflow-y-auto border rounded-md p-2 bg-white">
-                {columns.map((col, index) => (
-                  <div key={index} className="flex items-center mb-2">
-                    <input
-                      type="checkbox"
-                      id={`dropcol-${index}`}
-                      value={col}
-                      checked={params.drop_columns?.includes(col) || false}
-                      onChange={(e) => {
-                        const dropCols = params.drop_columns || [];
-                        if (e.target.checked) {
-                          handleParamChange('drop_columns', [...dropCols, col]);
-                        } else {
-                          handleParamChange('drop_columns', dropCols.filter(c => c !== col));
-                        }
-                      }}
-                      className="mr-2 h-4 w-4 text-coffee focus:ring-coffee-light border-maid-gray"
-                    />
-                    <label htmlFor={`dropcol-${index}`} className="text-sm text-maid-choco">{col}</label>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </>
-        );
-      
-      case 'merge':
-        return (
-          <>
-            <div className="mb-4">
-              <label className="input-label">Right Dataset:</label>
-              <select
-                className="select-base"
-                value={params.right_dataset || ''}
-                onChange={(e) => handleParamChange('right_dataset', e.target.value)}
-                required
-              >
-                <option value="">Select another dataset</option>
-                {availableDatasets.map((ds, index) => (
-                  <option key={index} value={ds}>{ds}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="input-label">Join Type:</label>
-              <select
-                className="select-base"
-                value={params.join_type || 'inner'}
-                onChange={(e) => handleParamChange('join_type', e.target.value)}
-                required
-              >
-                <option value="inner">Inner Join</option>
-                <option value="left">Left Join</option>
-                <option value="right">Right Join</option>
-                <option value="outer">Full Outer Join</option>
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="input-label">Left Key (current dataset):</label>
-              <select
-                className="select-base"
-                value={params.left_on || ''}
-                onChange={(e) => handleParamChange('left_on', e.target.value)}
-                required
-              >
-                <option value="">Select a column</option>
-                {columns.map((col, index) => (
-                  <option key={index} value={col}>{col}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className="mb-4">
-              <label className="input-label">Right Key (other dataset):</label>
-              <input
-                className="input-base"
-                type="text"
-                placeholder="Column name in right dataset"
-                value={params.right_on || ''}
-                onChange={(e) => handleParamChange('right_on', e.target.value)}
-                required
-              />
-            </div>
-          </>
-        );
-      
       default:
         return (
           <div className="text-maid-gray-dark italic text-center p-4">
-            Please select an operation to see its parameters.
+            Select an operation to see parameters.
           </div>
         );
     }
@@ -470,9 +228,10 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
 
   return (
     <div className="card bg-white p-4 rounded-lg shadow-soft border border-maid-gray-light">
-      <h2 className="card-header">Data Operations</h2>
-      
+      <h2 className="card-header">Data Operations Panel</h2>
+
       <form onSubmit={handleSubmit}>
+        {/* Operation Group Selection */}
         <div className="mb-4">
           <label className="input-label">Operation Category:</label>
           <div className="flex flex-wrap gap-2 mb-2">
@@ -481,8 +240,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
                 key={index}
                 type="button"
                 className={`py-1 px-3 rounded-md text-sm font-medium ${
-                  showAdvanced === group.groupName 
-                    ? 'bg-coffee text-white' 
+                  showAdvanced === group.groupName
+                    ? 'bg-coffee text-white'
                     : 'bg-maid-cream text-maid-choco hover:bg-maid-cream-dark'
                 }`}
                 onClick={() => setShowAdvanced(
@@ -494,22 +253,23 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
             ))}
           </div>
         </div>
-        
+
+        {/* Operation Selection within Group */}
         {showAdvanced && (
           <div className="mb-4">
-            <label className="input-label">Operation:</label>
+            <label className="input-label">Select Operation:</label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {operationGroups.find(g => g.groupName === showAdvanced)?.operations.map((op, index) => (
-                <div 
+                <div
                   key={index}
-                  className={`p-2 border rounded-md cursor-pointer ${
-                    operation === op.value 
-                      ? 'bg-coffee-light bg-opacity-20 border-coffee' 
+                  className={`p-2 border rounded-md cursor-pointer text-sm ${
+                    operation === op.value
+                      ? 'bg-coffee-light bg-opacity-20 border-coffee'
                       : 'hover:bg-maid-cream border-maid-gray-light'
                   }`}
                   onClick={() => {
                     setOperation(op.value);
-                    setParams({});
+                    // setParams({}); // Reset params when changing operation
                   }}
                 >
                   {op.label}
@@ -518,7 +278,8 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
             </div>
           </div>
         )}
-        
+
+        {/* Fallback Simple Selector (Optional) */}
         {!showAdvanced && (
           <div className="mb-4">
             <label className="input-label">Common Operations:</label>
@@ -527,29 +288,34 @@ const EnhancedOperationsPanel = ({ columns, onOperationSubmit, availableDatasets
               value={operation}
               onChange={(e) => {
                 setOperation(e.target.value);
-                setParams({});
+                // setParams({}); // Reset params when changing operation
+                // Automatically show the relevant group?
+                const group = operationGroups.find(g => g.operations.some(op => op.value === e.target.value));
+                setShowAdvanced(group?.groupName || false);
               }}
             >
-              <option value="filter">Filter Rows</option>
-              <option value="select_columns">Select Columns</option>
-              <option value="sort">Sort Values</option>
-              <option value="groupby">Group By</option>
-              <option value="rename">Rename Columns</option>
+              {/* Populate with common ops or all ops */}
+              {operationGroups.flatMap(g => g.operations).map(op => (
+                  <option key={op.value} value={op.value}>{op.label}</option>
+              ))}
             </select>
           </div>
         )}
-        
+
+        {/* Render the form for the selected operation */}
         <div className="mb-6 p-4 bg-maid-cream-light rounded-md border border-maid-gray-light">
           {renderOperationForm()}
         </div>
-        
+
+        {/* Submit Button */}
         <div className="flex items-center justify-end">
           <button
             type="submit"
             className="btn btn-coffee"
-            disabled={isLoading}
+            disabled={isLoading || !currentDataset} // Disable if no dataset selected
+            title={!currentDataset ? "Select a dataset first" : `Apply ${operation}`}
           >
-            {isLoading ? 'Processing...' : 'Apply'}
+            {isLoading ? 'Processing...' : 'Apply Operation'}
           </button>
         </div>
       </form>

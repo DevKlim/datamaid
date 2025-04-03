@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is an intuitive **Graphical User Interface (GUI)** tool that helps students and beginners work with datasets without needing to write code. It is designed as a **"Symbolab for pandas"** – just as Symbolab provides step-by-step solutions for math problems ([Step-by-Step Calculator](https://www.symbolab.com/solver/step-by-step#:~:text=,by%20step%20calculator%20for%20physics)), this application provides a step-by-step, visual approach to data analysis tasks. Users (especially those in data science courses like UCSD’s DSC10 or DSC80) can upload a CSV file and perform common data manipulation and analysis operations through a friendly interface. The tool executes these operations using the popular Python libraries **pandas** and **polars**, or via **SQL-like** queries, and shows users the equivalent code for each action. The primary goal is to make data wrangling accessible to beginners while helping them learn **pandas/polars syntax and SQL** by example. 
+This project is an intuitive **Graphical User Interface (GUI)** tool that helps students and beginners work with datasets without needing to write code. It is designed as a **"Symbolab for pandas"** – just as Symbolab provides step-by-step solutions for math problems ([Step-by-Step Calculator](https://www.symbolab.com/solver/step-by-step#:~:text=,by%20step%20calculator%20for%20physics)), this application provides a step-by-step, visual approach to data analysis tasks. Users (especially those in data science courses like UCSD’s DSC10 or DSC80) can upload a CSV file and perform common data manipulation and analysis operations through a friendly interface. The tool executes these operations using the popular Python libraries **pandas** and **polars**, or via **SQL-like** queries, and shows users the equivalent code for each action. The primary goal is to make data wrangling accessible to beginners while helping them learn **pandas/polars syntax and SQL** by example.
 
 ## Core Features (MVP)
 
@@ -52,7 +52,7 @@ The project is built with a modern, open-source tech stack to ensure a smooth us
 
 - **Backend API:** [FastAPI](https://fastapi.tiangolo.com/) (or Flask as an alternative) in Python for handling data operations and AI interactions. FastAPI is chosen for its high performance and intuitive syntax, which makes it straightforward to define API endpoints for each operation (e.g., an endpoint to perform a group-by and return results). It also simplifies integration with Python-based LLMs and data libraries. Flask could be used similarly, but FastAPI offers asynchronous support and automatic docs, beneficial for future expansion.
 
-- **Data Processing Engines:** 
+- **Data Processing Engines:**
   - **pandas:** The tried-and-true Python data analysis library for DataFrame operations. Widely taught and used, it’s the default engine in the app.
   - **polars:** A Rust-based DataFrame library accessible via Python. Polars operates in a similar DataFrame paradigm as pandas but is optimized for speed and low memory usage; it can be **10-100× faster on certain queries compared to pandas ([Polars — Updated PDS-H benchmark results](https://pola.rs/posts/benchmarks/#:~:text=Takeaways))**, especially for larger data.
   - **DuckDB:** An in-process SQL database engine. It allows executing SQL queries on local data (even without a separate database server) and can directly query pandas DataFrames or CSV files using SQL syntax ([Efficient SQL on Pandas with DuckDB – DuckDB](https://duckdb.org/2021/05/14/sql-on-pandas.html#:~:text=Published%20on%202021)). In this app, DuckDB (or a similar SQL engine) powers the SQL execution mode, enabling users to write SELECT queries on their dataset or have the GUI translate their actions to SQL behind the scenes.
@@ -61,8 +61,8 @@ The project is built with a modern, open-source tech stack to ensure a smooth us
   - *Mistral 7B/8x7B:* open-source models known for strong performance and accessibility (available under Apache 2.0 license ([DeepSeek vs. Mistral: Which LLM is Better? | Sapling](https://sapling.ai/llm/mistral-vs-deepseek#:~:text=Developed%20by%20some%20of%20the,and%20performant%20open%20source%20models))). These could be run locally on high-end hardware or accessed via a community API for natural language to code translation.
   - *DeepSeek models:* another set of cutting-edge models (e.g., DeepSeek R1 or V3) that are highly efficient and were notable in 2024-2025 for their cost-effective training and strong capabilities in reasoning. These can be used to interpret complex instructions or provide guided steps.
   - *Alternatively,* the backend could integrate with OpenAI/Anthropic APIs if available, but the emphasis is on **local or open** models to keep the tool accessible in academic settings without requiring paid API keys.
-  
-- **Storage & State:** In the MVP, the app does not use a database for user data. Uploaded datasets are held in-memory (or in the browser’s memory for client-side operations). For any necessary local persistence (like caching a dataset or storing user preferences), lightweight options like browser localStorage or small JSON files can be used. Since no authentication is involved initially, there’s no need for user accounts or heavy database usage. 
+
+- **Storage & State:** In the MVP, the app does not use a database for user data. Uploaded datasets are held in-memory (or in the browser’s memory for client-side operations). For any necessary local persistence (like caching a dataset or storing user preferences), lightweight options like browser localStorage or small JSON files can be used. Since no authentication is involved initially, there’s no need for user accounts or heavy database usage.
 
 - **Deployment:** The recommended deployment is to run the frontend as a static web app (which could be hosted on GitHub Pages, Vercel, etc.) and the backend as a separate service (which could run on a small cloud VM or locally on the user’s machine). During development or local use, a user can run the React dev server and the FastAPI server on their machine. For a more user-friendly distribution, packaging the app as a desktop application (using Electron or PyInstaller for instance) could be explored, but early versions will likely be run by users following setup instructions.
 
@@ -94,7 +94,7 @@ Follow these steps to set up the project on your local machine for development o
 
 1. **Prerequisites:** Make sure you have **Python 3.9+** and **Node.js 18+** installed on your system. You’ll also need `pip` for Python package installation and `npm` or `yarn` for Node package management.
 2. **Clone the Repository:** Download the project source code from the repository. (If this README is on GitHub, you can use `git clone <repo_url>`.)
-3. **Backend Setup (FastAPI/Flask):**  
+3. **Backend Setup (FastAPI/Flask):**
    - Navigate to the backend directory (e.g., `cd backend`).
    - Create a virtual environment (optional but recommended): `python -m venv venv` and activate it.
    - Install the required Python packages: `pip install -r requirements.txt`. This will install FastAPI/Flask, pandas, polars, DuckDB, and any LLM-related libraries specified.
@@ -102,12 +102,12 @@ Follow these steps to set up the project on your local machine for development o
      - If using FastAPI: run `uvicorn main:app --reload` (assuming the FastAPI app instance is in `main.py`).
      - If using Flask: run `flask run` (after setting any necessary environment variables).
    - The backend should start on a local port (e.g., http://127.0.0.1:8000 for FastAPI by default).
-4. **Frontend Setup (React):**  
+4. **Frontend Setup (React):**
    - Navigate to the frontend directory (e.g., `cd frontend`).
    - Install dependencies: `npm install` (this will install React, Tailwind, and other libraries).
    - Start the development server: `npm start` or `npm run dev` (depending on the setup). This will launch the React app on a local development server (e.g., http://localhost:3000).
    - The React app will likely proxy API calls to the backend (check configuration) so that requests to the API routes (for data ops or LLM queries) are forwarded to the FastAPI/Flask server.
-5. **Using the App:**  
+5. **Using the App:**
    - Open your web browser and go to the local frontend URL (e.g., http://localhost:3000).
    - You should see the application interface. Start by uploading a CSV file or choosing a sample dataset if provided.
    - Try out some operations: filter a column, do a group-by, or switch to SQL mode and run a query. You’ll see the resulting data table update, and you can view the generated code in the code panel.
@@ -139,75 +139,85 @@ Near-term milestones to look forward to:
 - Basic integration of a local LLM (possibly a small model) to prototype the natural language problem solver.
 - Collecting user feedback from initial testers (e.g., students in a data science class) to prioritize the next enhancements.
 
-In the long run, this project aspires to be a **learning platform for data science**. Just as one might use a calculator to verify math homework, students might use this tool to verify and understand their data analysis homework. The **"Symbolab for pandas"** nickname captures this vision: step-by-step guidance with the ability to peek under the hood at any time. 
+In the long run, this project aspires to be a **learning platform for data science**. Just as one might use a calculator to verify math homework, students might use this tool to verify and understand their data analysis homework. The **"Symbolab for pandas"** nickname captures this vision: step-by-step guidance with the ability to peek under the hood at any time.
 
 Stay tuned for updates, and thank you for your interest in the project! With the support of the community, we hope to lower the barrier to entry in data science and make learning data analysis an engaging, interactive experience.
 
+---
+
 ## BELOW IS UPDATED STATE
-# DataMaid: Your Friendly Data Analysis Helper 🧹✨
+
+# DataMaid: Your Friendly Multi-Dataset Analysis Helper 🧹✨
 
 ## Overview
 
-Welcome to **DataMaid**! This project is an intuitive **Graphical User Interface (GUI)** designed to make data exploration and manipulation accessible and maybe even a little bit cute! Inspired by helpful maid cafe staff, DataMaid assists students and beginners in working with datasets without needing extensive coding knowledge upfront.
+Welcome to **DataMaid**! This project is an intuitive **Graphical User Interface (GUI)** designed to make data exploration and manipulation accessible and maybe even a little bit cute! Inspired by helpful maid cafe staff, DataMaid assists students and beginners in working with **multiple datasets or relations** simultaneously, without needing extensive coding knowledge upfront.
 
-Think of it as a **visual guide for data wrangling** – just as Symbolab provides step-by-step math solutions, DataMaid offers a visual, interactive approach to common data analysis tasks. Users (especially those learning tools like pandas or SQL, perhaps in courses like UCSD’s DSC10 or DSC80) can upload datasets and perform operations through a friendly, modern interface with a touch of pastel charm.
+Think of it as a **visual guide for data wrangling across different tables** – just as Symbolab provides step-by-step math solutions, DataMaid offers a visual, interactive approach to common data analysis tasks involving one or more datasets. Users (especially those learning tools like pandas or SQL, perhaps in courses like UCSD’s DSC10 or DSC80) can upload datasets and perform operations primarily through an integrated **Code Editor**.
 
-DataMaid executes these operations using **pandas**, **polars**, **SQL** (via DuckDB), or even through fundamental **Relational Algebra** concepts. Most importantly, it **shows you the code** (Pandas, Polars, or SQL) generated for each GUI action, helping you learn by doing and seeing. The goal is to demystify data tasks while making the learning process more engaging.
+DataMaid executes code using **pandas**, **polars**, or **SQL** (via DuckDB). The key feature is that the Code Editor operates in an environment where **all loaded datasets are available** as variables (Pandas/Polars) or tables (SQL). You can write code like `results = df1.merge(df2)` or `new_table = SELECT * FROM table_a WHERE condition`. When code is executed:
+*   It can **modify existing datasets** (e.g., `my_data = my_data[...]`).
+*   It can **create new datasets** (e.g., `summary_table = my_data.groupby(...).agg(...)`).
+*   The list of available datasets updates automatically.
+*   The data table view updates to show the result of the modified or newly selected dataset.
+
+This approach helps you learn by writing and seeing the direct impact of your code on multiple data states. The goal is to demystify data tasks involving multiple tables while making the learning process more engaging.
 
 ## Core Features
 
-*   **Flexible Data Input:**
-    *   Upload **CSV files**.
-    *   Paste **raw text data** (CSV or JSON format).
-    *   Upload **database files** (SQLite, DuckDB).
+*   **Multi-Dataset Management:**
+    *   Upload **CSV files**, **database files** (SQLite, DuckDB), or paste **raw text data** (CSV/JSON).
     *   Import specific **tables from uploaded databases**.
+    *   Each uploaded or imported item becomes a named dataset/relation in the session.
+    *   View and switch between different loaded datasets using the NavBar dropdown.
+    *   Manage datasets (Rename, Delete) via the "Manage Datasets" page.
     *   *Data stays local on your machine.*
 
-*   **GUI-Based Data Operations:** A point-and-click interface for:
-    *   **Basic Transformations:** Filtering (with regex!), Selecting, Dropping, Renaming columns, Sorting.
-    *   **Data Cleaning:** Handling missing values (Fill/Drop), Changing data types, Dropping duplicates.
-    *   **Feature Engineering:** Creating columns using expressions, String/Date manipulations.
-    *   **Aggregations & Reshaping:** GroupBy with multiple aggregations, Pivot tables, Melt (Wide-to-Long).
-    *   **Joining & Set Operations:** Merging/Joining datasets (Inner, Left, Right, Outer), Relational Algebra set operations.
-    *   **(Planned):** Window functions, Sampling.
+*   **Code-Centric Transformations:**
+    *   Perform **all data transformations** using the integrated **Code Editor**.
+    *   Write Pandas, Polars, or SQL code.
+    *   The execution environment has access to **all currently loaded datasets** (e.g., if you have `customers` and `orders` loaded, you can use `customers` and `orders` variables in Pandas/Polars code, or query `customers` and `orders` tables in SQL mode).
+    *   **Create new datasets/relations** directly from code (e.g., `high_value_customers = customers[customers['order_total'] > 1000]`). The new dataset (`high_value_customers`) will appear in the dropdown list.
+    *   **Modify existing datasets** in place (e.g., `customers = customers.drop_duplicates()`). The view for `customers` will update.
 
-*   **Relational Algebra Support:** Visually perform RA operations:
-    *   Select (σ), Project (π), Rename (ρ)
-    *   Union (∪), Set Difference (-), Intersection (∩)
-    *   Cartesian Product (×)
-    *   Natural Join (⋈), Theta Join (⋈_θ)
-    *   *Generates and displays the equivalent SQL.*
+*   **Multiple Execution Engines:** Choose your backend for code execution:
+    *   **Pandas Mode:** Standard Python data workflows.
+    *   **Polars Mode:** High-performance data manipulation.
+    *   **SQL Mode:** Leverage the power of SQL with DuckDB across all loaded tables. Supports `SELECT` and `CREATE TABLE AS`.
 
-*   **Multiple Execution Engines:** Choose your backend:
-    *   **Pandas Mode:** Learn standard Python data workflows.
-    *   **Polars Mode:** Experience high-performance data manipulation.
-    *   **SQL Mode:** Leverage the power of SQL with DuckDB. (RA uses this).
+*   **Interactive Data Preview & State:**
+    *   The data table **updates automatically** when you execute code that modifies the currently viewed dataset, or when you select a different dataset from the NavBar dropdown.
+    *   See column statistics by clicking headers.
+    *   **Undo/Reset:** Basic history is maintained *per dataset*. You can undo the last code execution that modified the *currently viewed* dataset. Reset clears the modification history for the current view.
 
-*   **Live Code Generation:** See the Pandas, Polars, or SQL code for every GUI action. Learn by example!
+*   **Relational Algebra Support:** Visually perform RA operations on a selected base dataset:
+    *   Select (σ), Project (π), Rename (ρ), Set Operations (∪, -, ∩), Joins (⋈, ×).
+    *   Generates and displays the equivalent SQL chain.
+    *   Save the final RA result as a **new named dataset**.
 
-*   **Interactive Data Preview:** Real-time table updates, pagination, undo/reset functionality.
+*   **Cute & Modern UI:** A clean, aesthetically pleasing interface with rounded corners and a soft color palette inspired by maid cafes.
 
-*   **Cute & Modern UI:** A clean, aesthetically pleasing interface with rounded corners and a soft color palette inspired by maid cafes, designed to be less intimidating and more fun.
-
-*   **Local-First:** Your data is processed entirely within your browser and the local backend process.
+*   **Local-First:** Your data and computations are processed entirely locally.
 
 ## Future Features (Planned)
 
-*(Keep this section largely the same, maybe rephrase slightly if needed)*
+*(Keep this section largely the same)*
 *   **Natural Language Problem Solver...**
 *   **AI-Assisted Intent Recognition...**
 *   **Smart Function Recommendations...**
 *   **Additional Visualization...**
+*   **Code Persistence:** Save and restore the code in the editor for each dataset view.
 *   **Collaboration and Cloud Features...**
 
 ## Screenshots
 
 **(❗ IMPORTANT: Replace these placeholders with actual screenshots of the new UI!)**
 
-*   *[Screenshot of the main interface with a loaded dataset]*
-*   *[Screenshot showing an operation panel, e.g., Filter or GroupBy]*
-*   *[Screenshot highlighting the generated code display]*
-*   *[Screenshot of the Relational Algebra panel, if applicable]*
+*   *[Screenshot of the main interface showing the NavBar with multiple datasets in the dropdown, and the DataTable displaying the selected view]*
+*   *[Screenshot showing the Code Editor with code referencing multiple dataset variables (e.g., df1, df2)]*
+*   *[Screenshot showing the DataTable updated after executing code in the editor]*
+*   *[Screenshot of the Manage Datasets page listing several datasets]*
+*   *[Screenshot of the Relational Algebra panel]*
 
 ## Tech Stack
 
@@ -216,75 +226,100 @@ DataMaid executes these operations using **pandas**, **polars**, **SQL** (via Du
 *   **Data Processing Engines:**
     *   **pandas**
     *   **polars**
-    *   **DuckDB** (Powers SQL Mode, RA operations, DB file reading)
-*   **Font:** [Nunito](https://fonts.google.com/specimen/Nunito) (or your chosen font).
+    *   **DuckDB** (Powers SQL Mode, RA operations, DB file reading, multi-table SQL execution)
+*   **Code Parsing (Backend):** Python's `ast` module (for identifying assignments in Pandas/Polars code).
 *   **(Future):** LLM Integration (Local/Open models preferred).
-*   **State Management:** Backend in-memory dictionaries, Frontend React state.
+*   **State Management:** Backend Python dictionaries (holding all dataset contents), Frontend React state (managing available names, current view, UI state).
 
 ## Project Structure
 
+```markdown
 data-analysis-gui/
 ├── backend/
-│ ├── app/
-│ │ ├── init.py
-│ │ ├── main.py
-│ │ └── services/
-│ │ ├── init.py
-│ │ ├── pandas_service.py
-│ │ ├── polars_service.py
-│ │ ├── sql_service.py
-│ │ └── relational_algebra_service.py
-│ ├── requirements.txt
-│ └── ...
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── main.py             # Handles API endpoints, state management
+│   │   └── services/           # Helper functions for specific engines/RA
+│   │       ├── __init__.py
+│   │       ├── pandas_service.py # (Used less directly now)
+│   │       ├── polars_service.py # (Used less directly now)
+│   │       ├── sql_service.py    # (Used for loading/SQL execution)
+│   │       └── relational_algebra_service.py
+│   ├── requirements.txt
+│   └── ...
 ├── frontend/
-│ ├── public/
-│ ├── src/
-│ │ ├── components/
-│ │ ├── services/
-│ │ ├── App.jsx
-│ │ └── index.jsx | index.css | tailwind.config.js
-│ └── package.json
+│   ├── public/
+│   ├── src/
+│   │   ├── components/         # React UI components (NavBar, DataTable, CodeEditor, etc.)
+│   │   ├── services/           # api.js (API communication layer)
+│   │   ├── App.jsx             # Main application component, state logic
+│   │   └── index.jsx | index.css | tailwind.config.js
+│   └── package.json
+└── README.md
 └── ...
+Use code with caution.
+Markdown
+Design Philosophy
+Multi-Dataset Focus: Designed from the ground up to handle scenarios involving multiple related or unrelated datasets within the same session.
 
+Code as the Engine: Embrace code (Pandas, Polars, SQL) as the primary means of transformation, providing maximum flexibility.
 
-## Design Philosophy
+Education-First: Help users learn by showing the immediate impact of their code across different data states.
 
-*   **Education-First:** Show the code, make learning interactive.
-*   **Intuitive & Visual:** Point-and-click interactions.
-*   **Aesthetically Cute & Friendly:** A modern, soft UI theme to make data work feel less daunting and more inviting.
-*   **Instant Feedback:** See results immediately.
-*   **Performance:** Leverage efficient backends (Polars, DuckDB).
-*   **Simplify, Don't Dumb Down:** Accessible interface for powerful operations.
+Intuitive & Visual: Provide clear views of data, easy selection between datasets, and visual tools like RA.
 
-## Getting Started
+Aesthetically Cute & Friendly: A modern, soft UI theme.
 
-*(Keep instructions the same, but ensure they still work)*
+Instant Feedback: See results immediately in the data table after code execution or view switching.
 
-1.  **Prerequisites:** Python 3.9+, Node.js 18+, `pip`, `npm` (or `yarn`).
-2.  **Clone Repository:** `git clone <repo_url>`
-3.  **Backend Setup (FastAPI):**
-    ```bash
-    cd backend
-    python -m venv venv
-    source venv/bin/activate  # Windows: venv\Scripts\activate
-    pip install -r requirements.txt
-    cd app
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
-    ```
-4.  **Frontend Setup (React):**
-    ```bash
-    cd frontend # From project root
-    npm install
-    npm start # Or npm run dev (Should open e.g., http://localhost:3000)
-    ```
-5.  **Use DataMaid:** Open the frontend URL. Upload data (CSV, Paste, DB) and interact with the UI. Observe the themed components and generated code!
+Performance: Leverage efficient backends (Polars, DuckDB).
 
-*(Ensure frontend's `REACT_APP_API_URL` in `.env` (if used) points to `http://localhost:8000`)*
+Getting Started
+(Instructions remain largely the same, but emphasize the multi-dataset aspect)
 
-## Contributing
+Prerequisites: Python 3.9+, Node.js 18+, pip, npm (or yarn).
 
-Contributions welcome! Please open an issue or submit a PR. Let's make DataMaid even more helpful and cute!
+Clone Repository: git clone <repo_url>
 
-## Project Status and Future Outlook
+Backend Setup (FastAPI):
 
-DataMaid is actively developed. Core data operations, multiple input methods, multi-engine support, RA, and the new UI theme are implemented. Focus is on refining usability, adding more features (like visualizations and AI assistance), and ensuring educational value. We aim to provide a uniquely friendly and powerful learning tool for aspiring data analysts.
+cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+# Navigate into the app directory if main.py is there
+cd app
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# Or run from backend/ if main.py is directly in backend/
+# uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+Use code with caution.
+Frontend Setup (React):
+```bash
+
+cd frontend # From project root
+npm install
+npm start # Or npm run dev (Should open e.g., http://localhost:3000)
+Use code with caution.
+```
+
+### Use DataMaid:
+
+Open the frontend URL.
+
+Upload multiple CSVs or other data sources. Each will get a name.
+
+Use the NavBar dropdown to select which dataset you want to view in the DataTable.
+
+Use the Code Editor to write Pandas/Polars/SQL code. Your code can reference any loaded dataset by its sanitized variable name (Pandas/Polars) or table name (SQL).
+
+Execute code. Observe how the list of available datasets might change (if you created a new one) and how the DataTable updates if you modified the currently viewed dataset.
+
+Switch views using the dropdown to see other datasets.
+
+(Ensure frontend's REACT_APP_API_URL in .env (if used) points to http://localhost:8000)
+
+### Contributing
+Contributions welcome! Please open an issue or submit a PR. Let's make DataMaid even more helpful and cute for multi-dataset analysis!
+
+### Project Status and Future Outlook
+DataMaid is actively developed. The core architecture now supports multi-dataset management and code-centric transformations. Focus is on refining the user experience for switching views, executing code, managing dataset states, and improving features like undo/reset in the multi-dataset context. Future work includes visualization, AI assistance, and code persistence per view. We aim to provide a uniquely friendly and powerful learning tool for data analysis involving multiple data sources.
