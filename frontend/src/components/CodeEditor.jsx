@@ -107,7 +107,7 @@ const CodeEditor = ({
   // --- Snippet Loading & Helpers ---
   const loadSnippetsForEngine = (engineType, datasetName) => {
     const safeVarName = sanitizeVariableName(datasetName);
-    const safeTableName = datasetName ? `"${datasetName.replace(/"/g, '""')}"` : '"your_table_name"';
+    const safeTableName = sanitizeVariableName(datasetName);
     const snippets = {
       pandas: [
         { name: 'Filter rows', description: 'Filter rows based on a condition', code: `${safeVarName} = ${safeVarName}[${safeVarName}['column_name'] > value]` },
