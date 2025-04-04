@@ -1,192 +1,180 @@
 // src/components/NavBar.jsx
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom'; // Import Link
 import apiService from '../services/api';
 
+// Simple File Input component (can be styled further)
+const FileInput = ({ id, label, accept, onChange, disabled }) => (
+  <div className="relative inline-block">
+    <label
+      htmlFor={id}
+      className={`btn btn-outline px-3 py-1 text-sm cursor-pointer ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-maid-cream'}`}
+    >
+      {label}
+    </label>
+    <input
+      id={id}
+      type="file"
+      accept={accept}
+      onChange={onChange}
+      disabled={disabled}
+      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" // Hide the default input
+    />
+  </div>
+);
+
 const NavBar = ({
-  availableDatasets,
-  currentDataset,
-  currentEngine = 'pandas',
-  onDatasetUploaded,
+  availableDatasets = [],
+  currentDataset, // This is currentViewName from App.jsx
+  currentEngine,
+  onDatasetUploaded, // Expects result object
   onEngineChange,
-  onDatasetChange,
+  onDatasetChange, // Changes the current view
   onExport,
   onUploadText,
   onUploadDbFile,
-  isLoading
-  // Removed onRenameRequest, onDeleteRequest props
+  isLoading,
 }) => {
-  const [csvDatasetName, setCsvDatasetName] = useState('');
-  const [showExportMenu, setShowExportMenu] = useState(false);
-  const [localUploadError, setLocalUploadError] = useState(null);
-  const csvFileInputRef = useRef(null);
-  const dbFileInputRef = useRef(null);
+  const [selectedFormat, setSelectedFormat] = useState('csv');
 
-  const handleCsvFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const handleFileChange = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      // Use file name as default dataset name if user doesn't provide one
+      // For simplicity, we'll require the backend to handle naming or prompt later
+      // For now, let's assume a naming convention or prompt happens elsewhere
+      const defaultName = file.name.replace(/\.[^/.]+$/, ""); // Remove extension
+      // Prompting here is an option, but complicates flow. Backend handles overwrite warning.
+      const datasetName = prompt(`Enter a name for the uploaded dataset (default: ${defaultName}):`, defaultName);
+      if (datasetName && datasetName.trim()) {
+         // Call the handler passed from App.jsx which now expects the result object
+         // The actual upload API call happens in App.jsx's handler
+         // This component just triggers the process
+         // We need to pass the file and chosen name up
+         // Let's adjust the prop name for clarity
+         // onUploadFileTrigger({ file: file, name: datasetName.trim() }); // OLD
+         // NEW: Let App.jsx handle the prompt via onDatasetUploaded prop? No, that's for AFTER upload.
+         // Let's keep the prompt here for now.
+         apiService.uploadDataset(file, datasetName.trim())
+            .then(result => onDatasetUploaded(result)) // Pass result up
+            .catch(err => {
+                // Handle error display locally or pass up? Pass up via handleError prop?
+                console.error("Upload failed in NavBar:", err);
+                alert(`Upload failed: ${err?.response?.data?.detail || err.message || 'Unknown error'}`);
+            });
 
-    const name = csvDatasetName || file.name.replace(/\.[^/.]+$/, "");
-    setLocalUploadError(null);
-
-    try {
-      const result = await apiService.uploadDataset(file, name);
-      onDatasetUploaded(result);
-      if (csvFileInputRef.current) csvFileInputRef.current.value = null;
-      setCsvDatasetName('');
-    } catch (error) {
-      console.error('NavBar CSV Upload failed:', error);
-      const message = error.response?.data?.detail || error.message || 'CSV Upload failed';
-      setLocalUploadError(message);
+      } else {
+          alert("Upload cancelled or invalid name provided.");
+      }
+      event.target.value = null; // Reset file input
     }
   };
 
-  const handleDbFileUploadTrigger = (e) => {
-    const file = e.target.files[0];
-    if (file && onUploadDbFile) {
-      onUploadDbFile(file);
-      if (dbFileInputRef.current) dbFileInputRef.current.value = null;
+   const handleDbFileChange = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      onUploadDbFile(file); // Pass file up to App.jsx handler
     }
+    event.target.value = null; // Reset file input
   };
 
-  const handleEngineChange = (e) => onEngineChange(e.target.value);
-  const handleDatasetSelect = (e) => onDatasetChange(e.target.value);
-  const handleExportClick = (format) => { onExport(format); setShowExportMenu(false); };
+
+  const handleExportClick = () => {
+    if (currentDataset) {
+      onExport(selectedFormat);
+    } else {
+      alert("Please select a dataset to export.");
+    }
+  };
 
   return (
-    <nav className="bg-coffee bg-opacity-85 p-3 sticky top-0 z-30 shadow-md border-b border-coffee-light">
-      <div className="max-w-full mx-auto px-2 sm:px-4">
-        <div className="flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
-          {/* Left Side: Title & Logo */}
-          <div className="flex items-center flex-shrink-0">
-            <span className="text-maid-cream-light text-xl font-bold mr-2">
-              DataMaid
-            </span>
-            <span className="text-maid-cream-light text-sm opacity-80">♡</span>
-          </div>
+    <nav className="bg-white shadow-md px-4 py-2 flex flex-wrap justify-between items-center gap-y-2">
+      {/* Left Side: Logo/Title and View Selector */}
+      <div className="flex items-center space-x-4">
+        <Link to="/" className="text-xl font-bold text-maid-choco hover:text-coffee">
+          DataMaid <span role="img" aria-label="sparkles">✨</span>
+        </Link>
+        <div className="flex items-center space-x-2">
+          <label htmlFor="dataset-select" className="text-sm font-medium text-maid-choco">View:</label>
+          <select
+            id="dataset-select"
+            value={currentDataset || ''} // Use currentDataset (currentViewName)
+            onChange={(e) => onDatasetChange(e.target.value)}
+            disabled={isLoading || availableDatasets.length === 0}
+            className="select-base text-sm p-1 border border-maid-gray rounded-md min-w-[150px]"
+          >
+            <option value="" disabled={!!currentDataset}>-- Select Dataset --</option>
+            {availableDatasets.map(ds => (
+              <option key={ds} value={ds}>{ds}</option>
+            ))}
+          </select>
+        </div>
+      </div>
 
-          {/* Right Side: Controls */}
-          <div className="flex flex-wrap items-center justify-end flex-grow gap-x-3 gap-y-2">
-            {/* Dataset selector */}
-            {availableDatasets && availableDatasets.length > 0 && (
-              <select
-                className="bg-white bg-opacity-95 text-maid-choco rounded-md px-3 py-1.5 max-w-xs text-sm focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
-                onChange={handleDatasetSelect}
-                value={currentDataset || ""}
-                disabled={isLoading}
-                title={currentDataset || "Select Dataset"}
-              >
-                <option value="">Select Dataset</option>
-                {availableDatasets.map((dataset) => (
-                  <option key={dataset} value={dataset}>{dataset}</option>
-                ))}
-              </select>
-            )}
+      {/* Right Side: Actions */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+         {/* Upload Buttons */}
+         <FileInput
+            id="csv-upload"
+            label="Upload CSV"
+            accept=".csv"
+            onChange={handleFileChange} // Uses internal handler now
+            disabled={isLoading}
+          />
+         <FileInput
+            id="db-upload"
+            label="Upload DB"
+            accept=".db,.sqlite,.sqlite3,.duckdb"
+            onChange={handleDbFileChange} // Uses internal handler now
+            disabled={isLoading}
+          />
+         <button onClick={onUploadText} disabled={isLoading} className="btn btn-outline px-3 py-1 text-sm">
+            Paste Text
+         </button>
 
-            {/* Engine selector */}
-            <select
-              className="bg-white bg-opacity-95 text-maid-choco rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
-              value={currentEngine}
-              onChange={handleEngineChange}
-              disabled={isLoading}
-            >
-              <option value="pandas">Pandas</option>
-              <option value="polars">Polars</option>
-              <option value="sql">SQL</option>
-            </select>
-
-            {/* Export dropdown */}
-            <div className="relative">
-              <button
-                className="btn-nav btn-coffee flex items-center"
-                onClick={() => setShowExportMenu(!showExportMenu)}
-                disabled={!currentDataset || isLoading}
-                title="Export current dataset state"
-              >
-                Export
-                <svg className="w-3 h-3 ml-1 fill-current" viewBox="0 0 20 20"><path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" /></svg>
-              </button>
-              {showExportMenu && (
-                <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-coffee-light ring-opacity-5 z-40 py-1 border border-maid-gray-light">
-                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('csv')}>Export as CSV</button>
-                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('json')}>Export as JSON</button>
-                  <button className="block w-full text-left px-4 py-2 text-sm text-maid-choco hover:bg-maid-cream hover:text-maid-choco-dark" onClick={() => handleExportClick('excel')}>Export as Excel</button>
-                </div>
-              )}
-            </div>
-
-            {/* Upload Area Group */}
-            <div className="flex items-center space-x-2 border-l border-coffee-light border-opacity-50 pl-3 ml-1">
-                {/* CSV Upload */}
-                <div className="flex items-center space-x-1">
-                    <input
-                        type="text"
-                        placeholder="CSV Name (opt.)"
-                        className="bg-white bg-opacity-95 text-maid-choco rounded-md px-2 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-maid-cream-light border border-coffee-light"
-                        value={csvDatasetName}
-                        onChange={(e) => setCsvDatasetName(e.target.value)}
-                        disabled={isLoading}
-                        title="Optional name for uploaded CSV"
-                    />
-                    <div className="relative inline-block">
-                        <input
-                           type="file" id="csv-file-upload" ref={csvFileInputRef} accept=".csv"
-                           onChange={handleCsvFileUpload}
-                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                           disabled={isLoading}
-                        />
-                        <label htmlFor="csv-file-upload" className={`btn-nav btn-blue whitespace-nowrap ${isLoading ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
-                           Upload CSV
-                        </label>
-                    </div>
-                </div>
-
-                {/* Text Paste Button */}
-                <button
-                    onClick={onUploadText}
-                    className="btn-nav btn-green whitespace-nowrap"
-                    disabled={isLoading}
-                    title="Load data by pasting text (CSV or JSON)"
-                >
-                    Paste Text
-                </button>
-
-                {/* DB Upload Button */}
-                <div className="relative inline-block">
-                    <input
-                        type="file" id="db-file-upload" ref={dbFileInputRef}
-                        accept=".db,.sqlite,.sqlite3,.duckdb"
-                        onChange={handleDbFileUploadTrigger}
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                        disabled={isLoading}
-                    />
-                    <label htmlFor="db-file-upload" className={`btn-nav btn-purple whitespace-nowrap ${isLoading ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
-                        Upload DB
-                    </label>
-                </div>
-                <div className="border-l border-coffee-light border-opacity-50 pl-3 ml-1">
-                    <Link
-                       to="/manage-datasets"
-                       className="btn-nav btn-outline whitespace-nowrap"
-                       title="Rename or delete datasets"
-                    >
-                       Manage Datasets
-                   </Link>
-               </div>
-            </div>
-          </div>
+         {/* Engine Selector */}
+        <div className="flex items-center space-x-1">
+           <label htmlFor="engine-select" className="text-sm font-medium text-maid-choco">Engine:</label>
+           <select
+             id="engine-select"
+             value={currentEngine}
+             onChange={(e) => onEngineChange(e.target.value)}
+             disabled={isLoading}
+             className="select-base text-sm p-1 border border-maid-gray rounded-md"
+           >
+             <option value="pandas">Pandas</option>
+             <option value="polars">Polars</option>
+             <option value="sql">SQL</option>
+           </select>
         </div>
 
-        {/* Local Upload Error Display */}
-        {localUploadError && (
-          <div className="mt-2 p-1.5 bg-red-100 text-red-700 text-xs rounded flex justify-between items-center">
-            <span>Upload Error: {localUploadError}</span>
-            <button onClick={() => setLocalUploadError(null)} className="ml-2 font-bold text-red-800 text-xs">✕</button>
-          </div>
-        )}
+        {/* Export Section */}
+        <div className="flex items-center space-x-1 border-l pl-3 ml-1">
+           <label htmlFor="format-select" className="text-sm font-medium text-maid-choco">Export:</label>
+           <select
+             id="format-select"
+             value={selectedFormat}
+             onChange={(e) => setSelectedFormat(e.target.value)}
+             disabled={isLoading || !currentDataset}
+             className="select-base text-sm p-1 border border-maid-gray rounded-md"
+           >
+             <option value="csv">CSV</option>
+             <option value="json">JSON</option>
+             <option value="excel">Excel</option>
+           </select>
+           <button
+             onClick={handleExportClick}
+             disabled={isLoading || !currentDataset}
+             className="btn btn-outline px-3 py-1 text-sm"
+           >
+             Download
+           </button>
+        </div>
       </div>
     </nav>
   );
 };
+
+// Need to import apiService if handleFileChange calls it directly
 
 export default NavBar;

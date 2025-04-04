@@ -2,6 +2,7 @@
 import pandas as pd
 import io
 import numpy as np
+import traceback
 import re # Import re for regex operations
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -50,8 +51,6 @@ def apply_pandas_operation(df: pd.DataFrame, operation: str, params: Dict[str, A
             return _set_index_pd(df, params)
         elif operation == "reset_index":
             return _reset_index_pd(df, params)
-
-        # --- NEW Operations ---
         elif operation == "fillna":
             return _fillna_pd(df, params)
         elif operation == "dropna":
@@ -70,8 +69,15 @@ def apply_pandas_operation(df: pd.DataFrame, operation: str, params: Dict[str, A
              return _window_function_pd(df, params)
         elif operation == "sample":
              return _sample_pd(df, params)
-        # Regex ops handled by apply_pandas_regex, called from main.py's /regex-operation
-        # Add other specific ops here if needed
+        elif operation == "apply_lambda":
+             return _apply_lambda_pd(df, params)
+        elif operation == "shuffle": return _shuffle_pd(df, params)
+        elif operation.startswith("regex_"): # e.g., regex_filter, regex_extract, regex_replace
+             return apply_pandas_regex(df, operation.split('_', 1)[1], params)
+        elif operation == "string_operation": return _string_op_pd(df, params)
+        elif operation == "date_extract": return _date_extract_pd(df, params)
+        elif operation == "create_column": return _create_column_pd(df, params) # Uses eval! Risky.
+        elif operation == "window_function": return _window_function_pd(df, params)
 
         else:
             raise ValueError(f"Unsupported pandas operation: {operation}")
@@ -812,7 +818,7 @@ def _sample_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, 
     n = params.get("n") # Number of rows
     frac = params.get("frac") # Fraction of rows
     replace = params.get("replace", False) # Sample with replacement
-    random_state = params.get("seed") # Optional seed
+    random_state = params.get("seed") # Optional seed (named 'seed' from UI)
 
     if n is None and frac is None:
         raise ValueError("Sample requires either 'n' or 'frac'.")
@@ -831,6 +837,27 @@ def _sample_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, 
     except ValueError as e:
          # Catch errors like n > population size when replace=False
          raise ValueError(f"Error during sampling: {e}")
+
+    return result_df, code
+
+# --- NEW SHUFFLE IMPLEMENTATION ---
+def _shuffle_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    """Shuffles all rows of the DataFrame."""
+    # Params might include seed in the future
+    random_state = params.get("seed") # Optional seed for reproducibility
+
+    sample_args = {"frac": 1} # Sample 100% of rows
+    if random_state is not None:
+        sample_args["random_state"] = int(random_state)
+        code = f"# Shuffle all rows with seed {random_state}\ndf = df.sample(frac=1, random_state={random_state}).reset_index(drop=True)"
+    else:
+        code = f"# Shuffle all rows randomly\ndf = df.sample(frac=1).reset_index(drop=True)"
+
+    try:
+        # Shuffling is sampling frac=1, then reset index to avoid old index
+        result_df = df.sample(**sample_args).reset_index(drop=True)
+    except Exception as e:
+        raise ValueError(f"Error during shuffling: {e}")
 
     return result_df, code
 
@@ -872,28 +899,36 @@ def apply_pandas_regex(df: pd.DataFrame, operation: str, params: Dict[str, Any])
             # Construct regex to capture the group correctly within extract
             # Note: str.extract requires the *entire* pattern, group is implicitly returned
             code += f"# Ensure regex pattern captures the desired group {group}\n"
-            code += f"df['{new_column}'] = df['{column}'].astype(str).str.extract({repr(regex)}, expand=False{code_flags})"
+            code += f"df['{new_column}'] = df['{column}'].astype(str).str.extract({repr(regex)}, expand=False{code_flags})" # Note: extract returns the specified group directly if regex uses capture groups
             # Extract might need adjustment based on how group capture works with the pattern
             result_df = df.copy()
+            # Use pandas str.extract which correctly extracts specified groups
+            # If regex has one group, it returns Series. If multiple, DataFrame.
             extracted = string_series.str.extract(regex, expand=True, flags=flags)
-            # If multiple groups captured, select the desired one (adjusting index)
-            if isinstance(extracted, pd.DataFrame) and int(group)-1 < len(extracted.columns):
-                 result_df[new_column] = extracted.iloc[:, int(group)-1]
-            elif isinstance(extracted, pd.Series): # Single group captured
-                 result_df[new_column] = extracted
-            else:
-                 result_df[new_column] = None # Or raise error?
+
+            if isinstance(extracted, pd.DataFrame):
+                if int(group) - 1 < extracted.shape[1]: # Check if group index is valid (0-based for iloc)
+                     result_df[new_column] = extracted.iloc[:, int(group)-1]
+                else:
+                     raise ValueError(f"Group index {group} out of range for extracted groups.")
+            elif isinstance(extracted, pd.Series): # Single group captured or only one group in regex
+                 if int(group) == 1: # Only group 1 is possible if Series is returned
+                     result_df[new_column] = extracted
+                 else:
+                     raise ValueError(f"Requested group {group}, but regex only captured one group.")
+            else: # No match or other issue
+                 result_df[new_column] = None # Or should this raise error? Assigning None for no match.
 
         elif operation == "replace":
             replacement = params.get("replacement", "")
             new_column = params.get("new_column") # Optional: if provided, create new col
-            regex_compiled = re.compile(regex, flags=flags) # Compile for efficiency? Optional.
+            # regex_compiled = re.compile(regex, flags=flags) # Compile for efficiency? Optional.
 
             if new_column:
                 code += f"df['{new_column}'] = df['{column}'].astype(str).str.replace({repr(regex)}, {repr(replacement)}, regex=True{code_flags})"
                 result_df = df.copy()
                 result_df[new_column] = string_series.str.replace(regex, replacement, regex=True, flags=flags)
-            else: # Replace in place
+            else: # Replace in place (on copy)
                 code += f"df['{column}'] = df['{column}'].astype(str).str.replace({repr(regex)}, {repr(replacement)}, regex=True{code_flags})"
                 result_df = df.copy()
                 result_df[column] = string_series.str.replace(regex, replacement, regex=True, flags=flags)
@@ -906,6 +941,257 @@ def apply_pandas_regex(df: pd.DataFrame, operation: str, params: Dict[str, Any])
          raise ValueError(f"Error during regex '{operation}': {e}")
 
     return result_df, code
+
+def _string_op_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    column = params.get("column")
+    string_func = params.get("string_function") # 'upper', 'lower', 'strip', 'split', 'len'
+    new_col_name = params.get("new_column_name", f"{column}_{string_func}")
+    delimiter = params.get("delimiter")
+    part_index = params.get("part_index") # 0-based for pandas .str[] access
+
+    if not column or not string_func:
+        raise ValueError("string_operation requires 'column' and 'string_function'.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found.")
+
+    result_df = df.copy()
+    code = f"# Apply string operation '{string_func}' to column '{column}'\n"
+    op_series = None
+    op_code_str = ""
+
+    # Ensure column is string type for .str accessor
+    str_series_code = f"df['{column}'].astype(str).str"
+
+    try:
+        func_lower = string_func.lower()
+        if func_lower == 'upper':
+            op_code_str = f"{str_series_code}.upper()"
+            op_series = result_df[column].astype(str).str.upper()
+        elif func_lower == 'lower':
+            op_code_str = f"{str_series_code}.lower()"
+            op_series = result_df[column].astype(str).str.lower()
+        elif func_lower == 'strip':
+            op_code_str = f"{str_series_code}.strip()"
+            op_series = result_df[column].astype(str).str.strip()
+        elif func_lower == 'len':
+            op_code_str = f"{str_series_code}.len()"
+            op_series = result_df[column].astype(str).str.len()
+        elif func_lower == 'split':
+            if delimiter is None or part_index is None:
+                raise ValueError("String split requires 'delimiter' and 'part_index' (0-based).")
+            idx = int(part_index)
+            op_code_str = f"{str_series_code}.split({repr(delimiter)}, expand=True)[{idx}]"
+            # Use expand=True and select column index. Fill NA for rows where split doesn't yield enough parts.
+            op_series = result_df[column].astype(str).str.split(delimiter, expand=True).get(idx) # .get(idx) handles missing index gracefully -> None
+        else:
+            raise ValueError(f"Unsupported string_function for pandas: {string_func}")
+
+        code += f"df['{new_col_name}'] = {op_code_str}"
+        result_df[new_col_name] = op_series
+
+    except Exception as e:
+        raise ValueError(f"Error applying pandas string function '{string_func}': {e}")
+
+    return result_df, code
+
+def _date_extract_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    column = params.get("column")
+    part = params.get("part") # year, month, day, hour, minute, second, dayofweek, dayofyear, weekofyear, quarter
+    new_col_name = params.get("new_column_name", f"{column}_{part}")
+
+    if not column or not part:
+        raise ValueError("date_extract requires 'column' and 'part'.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found.")
+
+    result_df = df.copy()
+    code = f"# Extract '{part}' from date/time column '{column}'\n"
+    part_lower = part.lower()
+    # Map UI part names to pandas dt accessor attributes
+    valid_parts = ['year', 'month', 'day', 'hour', 'minute', 'second', 'microsecond', 'nanosecond',
+                'dayofweek', 'weekday', 'dayofyear', 'weekofyear', 'week', 'quarter']
+    if part_lower not in valid_parts:
+         # Allow direct attribute access if user provides valid pandas dt attribute
+         print(f"Warning: Date part '{part}' not in predefined list, attempting direct access.")
+         # raise ValueError(f"Invalid date part '{part}' for pandas. Valid examples: {valid_parts}")
+
+    dt_series_code = f"pd.to_datetime(df['{column}'], errors='coerce').dt"
+    op_code_str = f"{dt_series_code}.{part_lower}" # Access attribute directly
+
+    try:
+        # Convert to datetime, coercing errors to NaT (Not a Time)
+        dt_series = pd.to_datetime(result_df[column], errors='coerce').dt
+        # Access the requested attribute
+        extracted_part = getattr(dt_series, part_lower)
+
+        code += f"df['{new_col_name}'] = {op_code_str}"
+        result_df[new_col_name] = extracted_part
+
+    except AttributeError:
+         raise ValueError(f"Invalid date part '{part}' or column '{column}' is not convertible to datetime.")
+    except Exception as e:
+         raise ValueError(f"Failed to extract date part '{part}' from column '{column}'. Error: {e}")
+
+    return result_df, code
+
+def _create_column_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    new_col_name = params.get("new_column_name")
+    expression_str = params.get("expression") # Python expression string
+
+    if not new_col_name or not expression_str:
+        raise ValueError("create_column requires 'new_column_name' and 'expression' string.")
+
+    result_df = df.copy() # Work on a copy
+    code = f"# Create new column '{new_col_name}' using Python expression\n"
+    # The expression string can involve 'df', 'pd', 'np'
+    code += f"# Ensure 'pd' and 'np' are available if used in the expression\n"
+    code += f"df['{new_col_name}'] = {expression_str}"
+
+    # !!! SECURITY WARNING: EVALUATING ARBITRARY STRING EXPRESSIONS IS RISKY !!!
+    # This uses eval(), which can execute arbitrary code if not carefully controlled.
+    # Use only in trusted environments or replace with a safer evaluation method.
+    print(f"⚠️ SECURITY WARNING: Executing create_column_pd with eval() on expression: {expression_str}")
+    exec_globals = {'pd': pd, 'np': np}
+    exec_locals = {'df': result_df} # Pass the DataFrame copy to the eval context
+    try:
+        # Evaluate the expression string within the context of the DataFrame
+        # We use exec to handle assignments within the expression if needed,
+        # but eval is more common for calculating a value. Let's try eval first.
+        # result_series = eval(expression_str, exec_globals, exec_locals)
+
+        # Using exec is safer if the expression itself performs the assignment
+        exec(f"result_df['{new_col_name}'] = {expression_str}", exec_globals, {'result_df': result_df})
+
+        # Verify the column was created
+        if new_col_name not in result_df.columns:
+             raise ValueError(f"Expression did not successfully create column '{new_col_name}'. Check expression logic.")
+
+    except SyntaxError as se:
+        raise ValueError(f"Invalid syntax in expression: {expression_str}. Error: {se}")
+    except Exception as e:
+        # Catch errors during evaluation (e.g., column not found, type errors)
+        raise ValueError(f"Failed to evaluate or apply expression '{expression_str}': {e}")
+
+    return result_df, code
+
+def _window_function_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    func = params.get("window_function") # e.g., 'rank', 'lead', 'lag', 'sum', 'mean', 'row_number'
+    target_column = params.get("target_column") # Column for lead/lag/aggregates
+    order_by_columns = params.get("order_by_columns") # List of dicts: [{'column': 'c', 'ascending': True}]
+    partition_by_columns = params.get("partition_by_columns") # Optional list of column names
+    new_col_name = params.get("new_column_name", f"{func}_window")
+    # Function-specific params
+    rank_method = params.get("rank_method", "average") # For rank: 'average', 'min', 'max', 'dense', 'first'
+    offset = params.get("offset", 1) # For lead/lag (pandas uses shift)
+    default_value = params.get("default_value")
+    # Pandas rolling/expanding windows might need 'window_size' or 'min_periods' params later
+
+    # --- Validation ---
+    if not func: raise ValueError("Window function requires 'window_function' name.")
+    agg_funcs = ['sum', 'mean', 'median', 'std', 'var', 'count', 'min', 'max'] # Rolling/Expanding
+    lead_lag = ['lead', 'lag']
+    rank_funcs = ['rank', 'dense_rank', 'row_number'] # Map to rank methods
+
+    if func.lower() in agg_funcs + lead_lag and not target_column:
+        raise ValueError(f"Window function '{func}' requires a 'target_column'.")
+    # Order by is crucial for most window functions in pandas
+    if not order_by_columns and func.lower() != 'count': # Count might not strictly need order
+         raise ValueError("Window function requires 'order_by_columns' for meaningful results in Pandas.")
+
+    cols_to_check = []
+    if target_column: cols_to_check.append(target_column)
+    if order_by_columns: cols_to_check.extend([spec['column'] for spec in order_by_columns])
+    if partition_by_columns: cols_to_check.extend(partition_by_columns)
+    missing = [col for col in cols_to_check if col not in df.columns]
+    if missing: raise ValueError(f"Columns not found for window function: {', '.join(missing)}")
+
+    # --- Apply ---
+    result_df = df.copy()
+    code = f"# Apply window function '{func}'\n"
+    window_result = None
+
+    try:
+        # --- Sorting ---
+        # Pandas window functions often require data to be sorted first, especially rank/shift
+        sort_cols = []
+        sort_asc = []
+        if order_by_columns:
+            sort_cols = [spec['column'] for spec in order_by_columns]
+            sort_asc = [spec.get('ascending', True) for spec in order_by_columns]
+            code += f"# Ensure data is sorted for window function\n"
+            code += f"df_sorted = df.sort_values(by={repr(sort_cols)}, ascending={repr(sort_asc)})\n"
+            result_df = result_df.sort_values(by=sort_cols, ascending=sort_asc)
+        else:
+             # code += f"# Warning: Applying window function without explicit sort order\n"
+             pass # Proceed without sort if not specified, results might be unpredictable
+
+        # --- Grouping (Partitioning) ---
+        grouped = result_df
+        group_cols_repr = ""
+        if partition_by_columns:
+            group_cols_repr = repr(partition_by_columns)
+            code += f"# Partition data for window function\n"
+            code += f"grouped = df_sorted.groupby({group_cols_repr})\n"
+            grouped = result_df.groupby(partition_by_columns)
+        else:
+             # Apply globally if no partition columns
+             code += f"# Apply window function globally (no partitioning)\n"
+             grouped = result_df # Operate on the whole (sorted) DataFrame
+
+        # --- Apply Window Logic ---
+        func_lower = func.lower()
+        target_col_repr = f"['{target_column}']" if target_column else "" # For accessing column on group/df
+
+        if func_lower in rank_funcs:
+            pandas_rank_method = rank_method
+            if func_lower == 'dense_rank': pandas_rank_method = 'dense'
+            elif func_lower == 'row_number': pandas_rank_method = 'first' # Row number is like rank(method='first')
+
+            # Rank is applied to a column, typically the first sort column
+            rank_col = sort_cols[0] if sort_cols else target_column # Need a column to rank
+            if not rank_col: raise ValueError("Rank requires a column to rank by (specify target_column or order_by_columns).")
+
+            rank_col_repr = f"['{rank_col}']"
+            rank_args = f"method='{pandas_rank_method}', ascending={sort_asc[0] if sort_asc else True}"
+            code += f"df['{new_col_name}'] = grouped{rank_col_repr}.rank({rank_args})\n"
+            # Apply rank on the grouped object or the whole df
+            window_result = grouped[rank_col].rank(method=pandas_rank_method, ascending=(sort_asc[0] if sort_asc else True))
+
+        elif func_lower in lead_lag:
+            period = int(offset) if func_lower == 'lag' else -int(offset) # shift uses negative for lead
+            shift_args = f"periods={period}"
+            code += f"df['{new_col_name}'] = grouped{target_col_repr}.shift({shift_args})\n"
+            # Apply shift on the grouped object or the whole df
+            window_result = grouped[target_column].shift(periods=period)
+            # Handle default_value (fillna after shift)
+            if default_value is not None:
+                 code += f"df['{new_col_name}'] = df['{new_col_name}'].fillna({repr(default_value)})\n"
+                 window_result = window_result.fillna(default_value)
+
+        elif func_lower in agg_funcs:
+             # Requires rolling or expanding window - More params needed (window size)
+             # For simplicity, let's implement expanding (cumulative) versions first
+             # Example: Cumulative Sum
+             if func_lower == 'sum':
+                 code += f"df['{new_col_name}'] = grouped{target_col_repr}.cumsum()\n"
+                 window_result = grouped[target_column].cumsum()
+             elif func_lower == 'mean':
+                  code += f"df['{new_col_name}'] = grouped{target_col_repr}.expanding().mean()\n"
+                  window_result = grouped[target_column].expanding().mean()
+             # Add other expanding functions (min, max, count etc.) or rolling if needed
+             else:
+                 raise NotImplementedError(f"Pandas window aggregation '{func}' (expanding/rolling) requires more parameters or is not yet implemented.")
+        else:
+            raise ValueError(f"Unsupported window_function for pandas: {func}.")
+
+        # Assign result back to the original DataFrame index (important if grouped)
+        result_df[new_col_name] = window_result
+
+    except Exception as e:
+        raise ValueError(f"Error applying pandas window function '{func}': {e}")
+
+    return result_df, code
+
 
 def generate_pandas_code_snippet(operation: str, params: Dict[str, Any], df_var: str = "df") -> str:
     """Generates a single line/snippet of pandas code for a given operation."""
@@ -1033,3 +1319,46 @@ def replay_pandas_operations(original_content: bytes, history: List[Dict[str, An
 
     cumulative_code = "\n".join(cumulative_code_lines)
     return final_content, cumulative_code
+
+
+def _apply_lambda_pd(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    """Applies a lambda function defined as a string to a column."""
+    column = params.get("column")
+    lambda_str = params.get("lambda_str")
+    new_column_name = params.get("new_column_name") # Optional
+
+    if not column or not lambda_str:
+        raise ValueError("apply_lambda requires 'column' and 'lambda_str' parameters.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found for apply_lambda.")
+
+    # Basic validation of lambda string (very limited)
+    if not lambda_str.strip().startswith("lambda"):
+        raise ValueError("lambda_str must start with 'lambda'.")
+
+    result_df = df.copy()
+    target_column = new_column_name if new_column_name else column
+    code = f"# Apply lambda function to column '{column}'\n"
+    # Ensure necessary imports might be available in the lambda context (pd, np)
+    code += f"# Make sure 'pd' and 'np' are available if used in the lambda\n"
+    code += f"lambda_func = {lambda_str}\n" # Show the lambda definition
+    code += f"df['{target_column}'] = df['{column}'].apply(lambda_func)"
+
+    try:
+        # --- SECURITY WARNING: Using eval is risky! ---
+        # Create the actual lambda function from the string
+        # Provide pandas and numpy in the eval context for convenience
+        lambda_func = eval(lambda_str, {"pd": pd, "np": np})
+
+        # Apply the lambda function
+        result_df[target_column] = result_df[column].apply(lambda_func)
+
+    except SyntaxError as se:
+        raise ValueError(f"Invalid lambda function syntax: {se}") from se
+    except Exception as e:
+        # Catch errors during lambda execution (e.g., TypeError on incompatible data)
+        print(f"Error executing lambda on column '{column}': {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise ValueError(f"Error applying lambda to column '{column}': {e}. Check function logic and column data type.") from e
+
+    return result_df, code

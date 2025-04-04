@@ -1,4 +1,5 @@
 # backend/app/main.py
+# --- START OF FILE main.py ---
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,307 +14,202 @@ import tempfile
 import uuid
 import shutil
 import numpy as np
-import traceback # <-- Import traceback for detailed error logging
-from typing import Optional, List, Dict, Any, Union
+import traceback
+import ast # Import Abstract Syntax Trees for code parsing
+from typing import Optional, List, Dict, Any, Union, Tuple
 from pandas.errors import DataError, ParserError, EmptyDataError
 
 # Use relative import if services is a package in the same directory as main's parent
-from .services import pandas_service, polars_service, sql_service, relational_algebra_service # Adjusted import
+# Services might be less used now, code execution is central
+from .services import pandas_service, sql_service, relational_algebra_service, polars_service # pandas/polars services less critical now
 
 TEMP_UPLOAD_DIR = tempfile.gettempdir()
 print(f"Using temporary directory: {TEMP_UPLOAD_DIR}")
-app = FastAPI(title="Data Analysis GUI API")
+app = FastAPI(title="Data Analysis GUI API - Multi-Dataset")
 
-# Configure CORS - Ensure your frontend origin is listed
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001", # Allow other potential dev ports
+        "http://127.0.0.1:3001",
         "http://localhost:3001",
-        "https://datamaid.netlify.app" # Your production frontend origin
+        "https://datamaid.netlify.app"
     ],
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, DELETE, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- In-memory State ---
-# Stores the original uploaded datasets
-datasets: Dict[str, Dict[str, Any]] = {}
-
-# Stores the current transformed state and history for undo
-# Key: dataset_name
-transformations: Dict[str, Dict[str, Any]] = {}
+# --- In-memory State for Multiple Datasets ---
+# Key: dataset_name (string)
+# Value: Dict {
+#   "content": bytes (CSV format),
+#   "type": "dataframe" | "series",
+#   "origin": "upload" | "code" | "ra" | "db",
+#   "original_filename": Optional[str],
+#   "history": List[bytes] (optional, for simple undo)
+# }
+datasets_state: Dict[str, Dict[str, Any]] = {}
 
 # Stores paths to temporary DB files for import process
 temp_db_files: Dict[str, str] = {}
 
 # --- Helper Functions ---
+def _sanitize_variable_name(name: str) -> str:
+    """Converts a dataset name into a valid Python variable name."""
+    if not name: return 'data' # Changed default
+    # Replace non-alphanumeric characters (excluding underscore) with underscore
+    s_name = re.sub(r'[^\w]', '_', name)
+    # Ensure it doesn't start with a digit
+    if s_name and s_name[0].isdigit(): s_name = '_' + s_name
+    # Ensure it's not a Python keyword
+    keywords = {"if", "else", "while", "for", "def", "class", "import", "from", "try", "except", "finally", "return", "yield", "lambda", "global", "nonlocal", "pass", "break", "continue", "with", "as", "assert", "del", "in", "is", "not", "or", "and", "True", "False", "None"}
+    if s_name in keywords: s_name += '_'
+    # Handle potential empty string after sanitization
+    return s_name if s_name else 'data'
 
-def _get_load_code(dataset_name: str, engine: str, content: bytes) -> str:
-    """Generates the initial code string for loading the data."""
-    # For SQL, we need a table name convention. Let's use the dataset name.
-    # For Pandas/Polars, it's a standard read_csv.
-    safe_name = re.sub(r'\W|^(?=\d)', '_', dataset_name) # Basic sanitization for variable/table name
-    if engine == "pandas":
-        # Represent loading from an in-memory object for reproducibility
-        # In a real script, this would be pd.read_csv('filename.csv')
-        # For display, let's show a conceptual load
-        return f"# Load original data for '{dataset_name}'\n# df = pd.read_csv(...)\n# (Initial state loaded)"
-    elif engine == "polars":
-        return f"# Load original data for '{dataset_name}'\n# df = pl.read_csv(...)\n# (Initial state loaded)"
-    elif engine == "sql":
-        # The initial 'code' is just selecting from the base table loaded into DuckDB
-        sanitized_table_name = sql_service._sanitize_identifier(safe_name)
-        return f"-- Load original data for '{dataset_name}' into table {sanitized_table_name}\nSELECT * FROM {sanitized_table_name}"
+def cleanup_temp_file(file_path: str, delay: int = 0):
+     # Placeholder: Implement actual delayed cleanup if needed
+     if os.path.exists(file_path):
+         try:
+             os.remove(file_path)
+             print(f"Cleaned up temporary file: {file_path}")
+         except OSError as e:
+             print(f"Error cleaning up temp file {file_path}: {e}")
+
+def _determine_type_and_content(data: Union[pd.DataFrame, pd.Series]) -> Tuple[str, bytes]:
+    """Determines if data is DataFrame or Series and returns type string and CSV bytes."""
+    content_bytes: bytes
+    data_type: str
+    if isinstance(data, pd.DataFrame):
+        data_type = "dataframe"
+        with io.BytesIO() as buffer:
+            data.to_csv(buffer, index=False)
+            content_bytes = buffer.getvalue()
+    elif isinstance(data, pd.Series):
+        data_type = "series"
+        # Store Series as a single-column DataFrame CSV
+        df_temp = data.to_frame()
+        with io.BytesIO() as buffer:
+            df_temp.to_csv(buffer, index=False)
+            content_bytes = buffer.getvalue()
     else:
-        return f"# Load original data for '{dataset_name}'\n# (Initial state loaded)"
+        raise TypeError(f"Unsupported data type for state storage: {type(data)}")
+    return data_type, content_bytes
 
-def _build_full_code(prev_full_code: str, code_snippet: str, engine: str) -> str:
-    """Appends a new code snippet to the previous full code chain."""
-    if not prev_full_code: # Should have load code if starting
-        return code_snippet # Should not happen ideally
-
-    if engine == "pandas" or engine == "polars":
-        # Simple append for script-like code
-        return f"{prev_full_code}\n{code_snippet}"
-    elif engine == "sql":
-        # SQL uses CTE chaining, the 'snippet' is often the definition of the next CTE
-        # The sql_service now returns the *new full chain* directly.
-        # So, this function might just return the snippet if it's the full chain.
-        # Let's adjust: sql_service returns the *new full chain*, so we just use that.
-        return code_snippet # Assuming code_snippet *is* the new full SQL chain
-    else:
-        return f"{prev_full_code}\n# Operation: \n{code_snippet}"
-
-
-def get_current_state(dataset_name: str) -> Optional[Dict[str, Any]]:
-    """Gets the latest transformation state or None if only original exists."""
-    return transformations.get(dataset_name)
-
-def get_current_content(dataset_name: str) -> bytes:
-    """Gets the latest content bytes (original or transformed)."""
-    if dataset_name not in datasets:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found")
-
-    current_state = get_current_state(dataset_name)
-    if current_state:
-        return current_state["current_content"]
-    else:
-        # No transformations yet, return original content
-        return datasets[dataset_name]["content"]
-
-def get_current_full_code(dataset_name: str, engine: str) -> str:
-    """Gets the latest full code chain for the dataset and engine."""
-    current_state = get_current_state(dataset_name)
-    if current_state:
-        # If engine matches, return stored code. If not, return base load code for the new engine.
-        if current_state["current_engine"] == engine:
-            return current_state["current_full_code"]
-        else:
-            # Engine switch: Start new code chain from current content
-            # Note: content here is the *result* of the previous engine's ops
-            content = current_state["current_content"]
-            return _get_load_code(dataset_name, engine, content)
-    else:
-        # No transformations yet, return base load code for the requested engine
-        if dataset_name in datasets:
-             content = datasets[dataset_name]["content"]
-             return _get_load_code(dataset_name, engine, content)
-        else:
-             return f"# Dataset '{dataset_name}' not found"
-
-
-def update_transformation_state(dataset_name: str, engine: str, operation: str, params_or_code: Any, new_full_code: str, new_content: bytes):
-    """Updates the transformation state, handling history and engine switches."""
-    if dataset_name not in datasets:
-        print(f"Error: update_transformation_state called for non-existent dataset '{dataset_name}'")
-        return
-
-    # Get previous state or initialize based on original dataset
-    prev_state = get_current_state(dataset_name)
-    original_content = datasets[dataset_name]["content"]
-
-    # Determine state before this operation for history snapshot
-    content_before_op = prev_state["current_content"] if prev_state else original_content
-    full_code_before_op = prev_state["current_full_code"] if prev_state else _get_load_code(dataset_name, engine, original_content) # Use target engine for initial load code
-    engine_before_op = prev_state["current_engine"] if prev_state else engine # Assume starting with the current engine
-
-    history = prev_state["history"] if prev_state else []
-
-    # --- Engine Switch Logic ---
-    if prev_state and engine != engine_before_op:
-        print(f"Engine switched from {engine_before_op} to {engine}. Resetting transformation history for {dataset_name}.")
-        # The new chain starts from the content resulting from the previous engine's operations.
-        # The 'full_code_before_op' for the *new* engine chain is just the load statement.
-        full_code_before_op = _get_load_code(dataset_name, engine, content_before_op)
-        # Clear history as it's not relevant to the new engine chain
-        history = []
-        # The new_full_code received should be based on this initial load for the new engine
-        # (The caller endpoint needs to handle passing the correct initial code to the service on switch)
-    elif prev_state:
-         # Append the state *before* this operation to history for undo
-         history.append({
-             "current_content": content_before_op,
-             "current_full_code": full_code_before_op,
-             "current_engine": engine_before_op,
-             # Store op details that led *to* the new state (optional but useful)
-             "operation_applied": operation,
-             "engine_applied": engine,
-         })
-
-    # Update the main transformation state dictionary
-    transformations[dataset_name] = {
-        "current_content": new_content,
-        "current_full_code": new_full_code, # This is the full code *after* the operation
-        "current_engine": engine,
-        "history": history
-    }
-    print(f"State updated for {dataset_name}. History length: {len(history)}")
-    # print(f"New Full Code:\n{new_full_code}") # Debug
-
-
-def _get_preview_from_content(content: bytes, engine: str, limit: int = 100, offset: int = 0) -> Dict:
-    """Helper to generate preview dict from bytes using specified engine."""
-    # Adding top-level try-except for robustness
+def _get_preview_from_content(content: bytes, data_type: str = 'csv', limit: int = 100, offset: int = 0) -> Dict:
+    """Generates preview dict from content bytes based on data_type."""
     try:
-        if not content:
-             return {"data": [], "columns": [], "row_count": 0}
+        if not content: return {"data": [], "columns": [], "row_count": 0}
 
-        if engine == "pandas":
+        df = None
+        if data_type == 'csv':
             df = pd.read_csv(io.BytesIO(content))
-            return {
-                "data": df.iloc[offset:offset+limit].replace([np.inf, -np.inf], None).fillna('NaN').to_dict(orient="records"),
-                "columns": list(df.columns),
-                "row_count": len(df)
-            }
-        elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(content))
-            return {
-                "data": df.slice(offset, limit).fill_nan('NaN').to_dicts(),
-                "columns": df.columns,
-                "row_count": df.height
-            }
-        elif engine == "sql":
-             # SQL preview now needs to handle potentially complex CTE chains
-             # The content bytes represent the *result* of the last SQL op.
-             # We can load *this result* into a temp table for simple preview.
-             con = None
-             try:
-                 con = duckdb.connect(":memory:")
-                 # Load the *current result content* into a temporary table for previewing
-                 # Use a unique name to avoid clashes if multiple previews happen concurrently
-                 preview_table_name = f"__preview_{uuid.uuid4().hex[:8]}"
-                 sql_service._load_data_to_duckdb(con, preview_table_name, content)
-
-                 # Query the temporary preview table
-                 count_query = f"SELECT COUNT(*) FROM {sql_service._sanitize_identifier(preview_table_name)}"
-                 total_rows = con.execute(count_query).fetchone()[0]
-
-                 preview_query = f"SELECT * FROM {sql_service._sanitize_identifier(preview_table_name)} LIMIT {limit} OFFSET {offset}"
-                 preview_result = con.execute(preview_query)
-                 columns = [desc[0] for desc in preview_result.description]
-                 data_dicts = preview_result.fetch_arrow_table().to_pylist()
-                 # Add JSON serialization handling
-                 for row in data_dicts:
-                     for col, val in row.items():
-                         if hasattr(val, 'isoformat'): row[col] = val.isoformat()
-                         elif isinstance(val, (np.integer, np.int64)): row[col] = int(val)
-                         elif isinstance(val, (np.floating, np.float64)): row[col] = float(val) if not np.isnan(val) else 'NaN'
-                         elif isinstance(val, np.bool_): row[col] = bool(val)
-
-
-                 return { "data": data_dicts, "columns": columns, "row_count": total_rows }
-             except Exception as sql_preview_err:
-                  print(f"Error generating SQL preview from result content: {sql_preview_err}")
-                  # Fallback to pandas preview of the result content
-                  df = pd.read_csv(io.BytesIO(content))
-                  return {
-                      "data": df.iloc[offset:offset+limit].replace([np.inf, -np.inf], None).fillna('NaN').to_dict(orient="records"),
-                      "columns": list(df.columns),
-                      "row_count": len(df)
-                  }
-             finally:
-                 if con: con.close()
+        # Add elif for other types like 'parquet' if needed in the future
+        # elif data_type == 'parquet':
+        #     df = pd.read_parquet(io.BytesIO(content))
         else:
-             raise ValueError(f"Unsupported engine for preview: {engine}")
+            # Fallback or error for unsupported types
+            print(f"Preview Warning: Unsupported data_type '{data_type}', attempting CSV read.")
+            df = pd.read_csv(io.BytesIO(content)) # Try CSV as default
+
+        # Handle potential non-serializable types during preview generation
+        preview_df = df.iloc[offset:offset+limit].copy()
+        for col in preview_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(preview_df[col]):
+                 preview_df[col] = preview_df[col].astype(str)
+            # Add more type handling here if needed
+
+        # Replace inf/-inf with None, fill NaN with 'NaN' string
+        data_list = preview_df.replace([np.inf, -np.inf], None).fillna('NaN').to_dict(orient="records")
+
+        return {
+            "data": data_list,
+            "columns": list(df.columns),
+            "row_count": len(df)
+        }
     except (ParserError, EmptyDataError) as pe:
-        print(f"Pandas/Polars Preview Error: {pe}")
-        raise HTTPException(status_code=400, detail=f"Cannot generate preview: Invalid CSV format. {str(pe)}")
+        print(f"Preview Error ({data_type}): {pe}")
+        return {"data": [], "columns": [], "row_count": 0, "error": f"Preview failed ({data_type}): {str(pe)}"}
     except Exception as e:
-        print(f"Error generating preview with {engine}: {type(e).__name__}: {e}")
+        print(f"Error generating preview ({data_type}): {type(e).__name__}: {e}")
         traceback.print_exc()
-        # Fallback attempt with Pandas (if not already tried)
-        if engine != "pandas":
-            try:
-                df = pd.read_csv(io.BytesIO(content))
-                return {
-                    "data": df.iloc[offset:offset+limit].replace([np.inf, -np.inf], None).fillna('NaN').to_dict(orient="records"),
-                    "columns": list(df.columns),
-                    "row_count": len(df)
-                }
-            except Exception as pd_e:
-                print(f"Fallback pandas preview failed: {pd_e}")
-                raise HTTPException(status_code=500, detail=f"Error processing dataset preview: {str(e)}")
-        else:
-            # If pandas itself failed, raise the original error
-             raise HTTPException(status_code=500, detail=f"Error processing dataset preview ({engine}): {str(e)}")
-
-
-def cleanup_temp_file(file_path: str):
-    """Safely removes a temporary file."""
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"Cleaned up temp file: {file_path}")
-    except OSError as e:
-        print(f"Error cleaning up temp file {file_path}: {e}")
-
+        return {"data": [], "columns": [], "row_count": 0, "error": f"Preview failed ({data_type}): {str(e)}"}
 
 # --- Basic Endpoints ---
 @app.get("/")
 async def read_root():
-    return {"message": "Data Analysis GUI API is running"}
+    return {"message": "DataMaid API (Multi-Dataset) is running"}
 
 @app.get("/test-connection")
 async def test_connection():
     return {"status": "success", "message": "Backend connection is working"}
 
-# --- Upload Endpoints (/upload, /upload-text, /upload-db) ---
-# These endpoints initialize the entry in `datasets` and clear any existing transformations.
+# --- Upload Endpoints (Update state structure) ---
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), dataset_name: str = Form(...)):
-    # ... (validation logic remains the same) ...
+    """Uploads a CSV/JSON file and stores it as a named dataset (DataFrame or Series)."""
+    if not dataset_name.strip():
+        raise HTTPException(status_code=400, detail="Dataset name cannot be empty.")
+    if not file.filename:
+         raise HTTPException(status_code=400, detail="Invalid file upload.")
+
+    contents = await file.read()
+    if not contents: raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    data_type = "dataframe" # Default assumption
+    content_bytes = contents
+    original_filename = file.filename
+
     try:
-        contents = await file.read()
-        if not contents: raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-        try: pd.read_csv(io.BytesIO(contents), nrows=5)
-        except (ParserError, EmptyDataError) as csv_err: raise HTTPException(status_code=400, detail=f"File '{file.filename}' does not appear to be a valid CSV: {csv_err}")
-        except Exception as val_err: raise HTTPException(status_code=400, detail=f"Could not validate CSV file '{file.filename}': {val_err}")
+        # Attempt to read as CSV first
+        try:
+            df = pd.read_csv(io.BytesIO(contents))
+            # Check if it's likely a Series (single column)
+            if len(df.columns) == 1:
+                # Heuristic: If it has one column, treat as Series for type hint
+                # but store as DataFrame CSV for consistency
+                data_type = "series"
+                print(f"Detected single column, treating '{dataset_name}' as Series type.")
+            # Re-serialize to ensure consistent CSV format
+            data_type, content_bytes = _determine_type_and_content(df)
 
-        if dataset_name in datasets: print(f"Warning: Overwriting dataset '{dataset_name}' via file upload.")
+        except (ParserError, EmptyDataError, UnicodeDecodeError):
+            # If CSV fails, try JSON (records orientation)
+            try:
+                df_json = pd.read_json(io.StringIO(contents.decode('utf-8')), orient="records")
+                # Determine type and serialize back to CSV
+                data_type, content_bytes = _determine_type_and_content(df_json)
+                original_filename += ".csv" # Indicate stored format change
+                print(f"Successfully parsed uploaded file '{file.filename}' as JSON records.")
+            except Exception as json_err:
+                raise HTTPException(status_code=400, detail=f"File '{file.filename}' is not a valid CSV or JSON (records format): {json_err}")
+        except Exception as val_err:
+            raise HTTPException(status_code=400, detail=f"Could not validate file '{file.filename}': {val_err}")
 
-        # Store in primary dataset registry
-        datasets[dataset_name] = { "content": contents, "filename": file.filename }
-        # Clear any previous transformations for this dataset name
-        if dataset_name in transformations: del transformations[dataset_name]
+        if dataset_name in datasets_state: print(f"Warning: Overwriting dataset '{dataset_name}' via file upload.")
 
-        # Generate preview using default engine (e.g., pandas)
-        preview_info = _get_preview_from_content(contents, engine="pandas", limit=10)
-        # Get initial load code for default engine
-        initial_code = _get_load_code(dataset_name, "pandas", contents)
+        # Store in the main state dictionary
+        datasets_state[dataset_name] = {
+            "content": content_bytes,
+            "type": data_type,
+            "origin": "upload",
+            "original_filename": original_filename,
+            "history": [] # Initialize history
+        }
+
+        preview_info = _get_preview_from_content(content_bytes, data_type, limit=100)
 
         return {
-            "message": f"Successfully uploaded {file.filename} as '{dataset_name}'",
+            "message": f"Successfully uploaded {file.filename} as '{dataset_name}' ({data_type})",
             "dataset_name": dataset_name,
-            "preview": preview_info["data"],
-            "columns": preview_info["columns"],
-            "row_count": preview_info["row_count"],
-            "can_undo": False, # New upload, no history
-            "can_reset": False,
-            "last_code": initial_code # Show initial load code
+            "dataset_type": data_type,
+            "preview": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "datasets": sorted(list(datasets_state.keys())) # Return all names
         }
     except HTTPException as http_err: raise http_err
     except Exception as e:
@@ -323,49 +219,63 @@ async def upload_file(file: UploadFile = File(...), dataset_name: str = Form(...
     finally:
          if file: await file.close()
 
+
 @app.post("/upload-text")
 async def upload_text_data(
     dataset_name: str = Form(...),
     data_text: str = Form(...),
     data_format: str = Form("csv", enum=["csv", "json"])
 ):
-    # ... (validation and conversion logic remains the same) ...
+    """Uploads text data (CSV/JSON) and stores it as a named dataset."""
+    if not dataset_name.strip(): raise HTTPException(status_code=400, detail="Dataset name cannot be empty.")
     if not data_text.strip(): raise HTTPException(status_code=400, detail="Pasted text cannot be empty.")
-    if dataset_name in datasets: print(f"Warning: Overwriting existing dataset '{dataset_name}' from text upload.")
+    if dataset_name in datasets_state: print(f"Warning: Overwriting existing dataset '{dataset_name}' from text upload.")
+
+    data_type = "dataframe"
+    content_bytes = None
+    original_filename = f"{dataset_name}_pasted"
 
     try:
-        content_bytes = None
-        filename_suffix = data_format
+        df: Union[pd.DataFrame, pd.Series]
         if data_format == "csv":
-            content_bytes = data_text.encode('utf-8')
-            pd.read_csv(io.BytesIO(content_bytes), nrows=5) # Validate
+            df = pd.read_csv(io.StringIO(data_text))
+            original_filename += ".csv"
         elif data_format == "json":
             try:
-                df_json = pd.read_json(io.StringIO(data_text), orient="records")
-                with io.BytesIO() as buffer: df_json.to_csv(buffer, index=False); content_bytes = buffer.getvalue()
-                filename_suffix = "csv" # Stored as CSV
-            except ValueError as json_err: raise HTTPException(status_code=400, detail=f"Could not parse JSON data (expected records format): {json_err}")
-        else: raise HTTPException(status_code=400, detail=f"Unsupported data_format: {data_format}")
+                # Try records first, then maybe other orientations if needed
+                df = pd.read_json(io.StringIO(data_text), orient="records")
+                original_filename += ".json" # Original format was JSON
+            except ValueError as json_err:
+                raise HTTPException(status_code=400, detail=f"Could not parse JSON data (expected records format): {json_err}")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported data_format: {data_format}")
+
+        # Determine type and serialize to CSV bytes
+        data_type, content_bytes = _determine_type_and_content(df)
+        if data_type == "series":
+             print(f"Detected single column from text, treating '{dataset_name}' as Series type.")
 
         if content_bytes is None: raise ValueError("Failed to convert text data to bytes.")
 
-        # Store in primary dataset registry
-        datasets[dataset_name] = { "content": content_bytes, "filename": f"{dataset_name}_pasted.{filename_suffix}"}
-        # Clear any previous transformations
-        if dataset_name in transformations: del transformations[dataset_name]
+        # Store in the main state dictionary
+        datasets_state[dataset_name] = {
+            "content": content_bytes,
+            "type": data_type,
+            "origin": "upload",
+            "original_filename": original_filename,
+            "history": []
+        }
 
-        preview_info = _get_preview_from_content(content_bytes, engine="pandas", limit=10)
-        initial_code = _get_load_code(dataset_name, "pandas", content_bytes)
+        preview_info = _get_preview_from_content(content_bytes, data_type, limit=100)
 
         return {
-            "message": f"Successfully loaded data as '{dataset_name}'",
+            "message": f"Successfully loaded data as '{dataset_name}' ({data_type})",
             "dataset_name": dataset_name,
-            "preview": preview_info["data"],
-            "columns": preview_info["columns"],
-            "row_count": preview_info["row_count"],
-            "can_undo": False,
-            "can_reset": False,
-            "last_code": initial_code
+            "dataset_type": data_type,
+            "preview": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "datasets": sorted(list(datasets_state.keys())) # Return all names
         }
     except (ParserError, EmptyDataError, ValueError) as pe: raise HTTPException(status_code=400, detail=f"Could not parse {data_format.upper()} data: {str(pe)}")
     except HTTPException as http_err: raise http_err
@@ -374,33 +284,39 @@ async def upload_text_data(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Could not process text data: {str(e)}")
 
+
 @app.post("/upload-db")
 async def upload_database_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    # ... (logic remains the same, stores file path in temp_db_files) ...
+    # Logic remains the same, stores file path in temp_db_files
     allowed_extensions = {".db", ".sqlite", ".sqlite3", ".duckdb"}
     temp_file_path = None
     try:
-        file_ext = os.path.splitext(file.filename)[1].lower()
+        file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else ''
         if file_ext not in allowed_extensions: raise HTTPException(status_code=400, detail=f"Unsupported file type '{file_ext}'. Allowed: {allowed_extensions}")
 
         temp_id = str(uuid.uuid4())
         temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"dbupload_{temp_id}{file_ext}")
+
+        # Ensure file object exists before accessing file attribute
+        if not hasattr(file, 'file'):
+             raise HTTPException(status_code=400, detail="Invalid file object received.")
 
         with open(temp_file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
 
         con = None
         try:
             con = duckdb.connect(temp_file_path, read_only=True)
-            con.execute("SELECT 1")
+            con.execute("SELECT 1") # Test connection
         except duckdb.Error as db_err:
-             cleanup_temp_file(temp_file_path)
+             if temp_file_path: cleanup_temp_file(temp_file_path)
              raise HTTPException(status_code=400, detail=f"Uploaded file is not a valid database or is corrupted: {db_err}")
         finally:
             if con: con.close()
 
         temp_db_files[temp_id] = temp_file_path
         print(f"Stored temporary DB file: {temp_file_path} with ID: {temp_id}")
-        # Add cleanup task? Example: background_tasks.add_task(cleanup_temp_file, temp_file_path) # Be careful with timing
+        # Schedule cleanup after a delay (e.g., 1 hour)
+        # background_tasks.add_task(cleanup_temp_file, temp_file_path, delay=3600) # Requires async sleep or separate scheduler
         return {"message": "Database file uploaded successfully.", "temp_db_id": temp_id}
 
     except HTTPException as http_err: raise http_err
@@ -413,10 +329,9 @@ async def upload_database_file(background_tasks: BackgroundTasks, file: UploadFi
         if file: await file.close()
 
 
-# --- DB Table Listing/Import (/list-db-tables, /import-db-table) ---
 @app.get("/list-db-tables/{temp_db_id}")
 async def list_database_tables(temp_db_id: str):
-    # ... (logic remains the same) ...
+    # Logic remains the same
     if temp_db_id not in temp_db_files: raise HTTPException(status_code=404, detail="Temporary database ID not found or expired.")
     file_path = temp_db_files[temp_db_id]
     if not os.path.exists(file_path):
@@ -436,49 +351,64 @@ async def list_database_tables(temp_db_id: str):
     finally:
          if con: con.close()
 
+
 @app.post("/import-db-table")
 async def import_database_table(
     temp_db_id: str = Form(...),
     table_name: str = Form(...),
     new_dataset_name: str = Form(...)
 ):
-    # ... (logic remains the same, but updates datasets and clears transformations) ...
+    """Imports a table from an uploaded DB file into the datasets_state."""
+    if not new_dataset_name.strip(): raise HTTPException(status_code=400, detail="New dataset name cannot be empty.")
     if temp_db_id not in temp_db_files: raise HTTPException(status_code=404, detail="Temporary database ID not found or expired.")
     file_path = temp_db_files[temp_db_id]
     if not os.path.exists(file_path):
          if temp_db_id in temp_db_files: del temp_db_files[temp_db_id]
          raise HTTPException(status_code=404, detail="Temporary database file not found (may have been cleaned up).")
 
-    if new_dataset_name in datasets: print(f"Warning: Overwriting existing dataset '{new_dataset_name}' from DB import.")
+    if new_dataset_name in datasets_state: print(f"Warning: Overwriting existing dataset '{new_dataset_name}' from DB import.")
 
     con = None
     try:
         con = duckdb.connect(file_path, read_only=True)
-        s_table_name = sql_service._sanitize_identifier(table_name)
-        try: con.execute(f"SELECT 1 FROM {s_table_name} LIMIT 1;")
-        except duckdb.Error: raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found in the database file.")
+        # Sanitize table name for SQL query
+        s_table_name = table_name
+        try:
+            # Check if table exists
+            con.execute(f"SELECT 1 FROM {s_table_name} LIMIT 1;")
+        except duckdb.Error:
+            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found in the database file.")
 
+        # Fetch data as Pandas DataFrame
         imported_df = con.execute(f"SELECT * FROM {s_table_name};").fetchdf()
 
-        with io.BytesIO() as buffer: imported_df.to_csv(buffer, index=False); content_bytes = buffer.getvalue()
+        # Determine type and serialize to CSV bytes
+        data_type, content_bytes = _determine_type_and_content(imported_df)
+        if data_type == "series":
+             print(f"Imported table '{table_name}' has one column, treating '{new_dataset_name}' as Series type.")
 
-        # Store in primary dataset registry
-        datasets[new_dataset_name] = { "content": content_bytes, "filename": f"{new_dataset_name}_from_{table_name}.csv" }
-        # Clear any previous transformations
-        if new_dataset_name in transformations: del transformations[new_dataset_name]
+        # Store in the main state dictionary
+        datasets_state[new_dataset_name] = {
+            "content": content_bytes,
+            "type": data_type,
+            "origin": "db",
+            "original_filename": f"{new_dataset_name}_from_{table_name}.csv",
+            "history": []
+        }
 
-        preview_info = _get_preview_from_content(content_bytes, engine="pandas", limit=10)
-        initial_code = _get_load_code(new_dataset_name, "pandas", content_bytes)
+        preview_info = _get_preview_from_content(content_bytes, data_type, limit=100)
+
+        # Clean up the temp DB file associated with this import ID? Maybe not yet, user might import another table.
+        # Consider adding a separate cleanup mechanism or timeout for temp_db_files.
 
         return {
-            "message": f"Successfully imported table '{table_name}' as dataset '{new_dataset_name}'",
+            "message": f"Successfully imported table '{table_name}' as dataset '{new_dataset_name}' ({data_type})",
             "dataset_name": new_dataset_name,
-            "preview": preview_info["data"],
-            "columns": preview_info["columns"],
-            "row_count": preview_info["row_count"],
-            "can_undo": False,
-            "can_reset": False,
-            "last_code": initial_code
+            "dataset_type": data_type,
+            "preview": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "datasets": sorted(list(datasets_state.keys())) # Return all names
         }
     except HTTPException as http_err: raise http_err
     except (duckdb.Error, ValueError) as db_err: raise HTTPException(status_code=500, detail=f"Error importing table '{table_name}': {db_err}")
@@ -490,710 +420,763 @@ async def import_database_table(
         if con: con.close()
 
 
-# --- Dataset Listing & Retrieval (/datasets, /dataset/{name}, /dataset-info, /column-stats) ---
+# --- Dataset Listing & Retrieval (Updated) ---
 @app.get("/datasets")
 async def get_datasets_list():
+    """Returns the names of all currently available datasets."""
     try:
-        # Return names from the primary dataset registry
-        return {"datasets": sorted(list(datasets.keys()))}
+        return {"datasets": sorted(list(datasets_state.keys()))}
     except Exception as e:
         print(f"Error listing datasets: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve dataset list.")
 
 @app.get("/dataset/{dataset_name}")
-async def get_dataset_preview(
+async def get_dataset_view(
     dataset_name: str,
-    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0)
 ):
-    """Gets the preview of the current state and the full code chain."""
-    try:
-        content = get_current_content(dataset_name) # Handles 404 if dataset_name not in datasets
-        preview_info = _get_preview_from_content(content, engine, limit, offset) # Handles preview errors
+    """Gets the preview, type, and info for a specific named dataset."""
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
 
-        current_state = get_current_state(dataset_name)
-        can_undo = bool(current_state and current_state.get("history"))
-        # Can reset if there's *any* transformation state stored
-        can_reset = bool(current_state)
-        # Get the full code chain for the *requested* engine
-        current_full_code = get_current_full_code(dataset_name, engine)
+    try:
+        state_entry = datasets_state[dataset_name]
+        content = state_entry["content"]
+        data_type = state_entry["type"]
+        preview_info = _get_preview_from_content(content, data_type, limit, offset)
+
+        can_undo = bool(state_entry.get("history"))
+        # Can reset if it has history (simplification: reset clears history)
+        can_reset = can_undo
 
         return {
-            "data": preview_info["data"],
-            "columns": preview_info["columns"],
-            "row_count": preview_info["row_count"],
+            "dataset_name": dataset_name,
+            "dataset_type": data_type,
+            "data": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
             "can_undo": can_undo,
             "can_reset": can_reset,
-            "last_code": current_full_code # Send the full code chain
+            # No last_code needed here, frontend manages editor state
         }
-    except HTTPException as http_err:
-        raise http_err # Propagate 404 or preview errors
     except Exception as e:
-        print(f"Error in get_dataset_preview for '{dataset_name}': {type(e).__name__}: {e}")
+        print(f"Error in get_dataset_view for '{dataset_name}': {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve preview for '{dataset_name}'.")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve view for '{dataset_name}'.")
 
-
+# --- Info/Stats Endpoints (Operate on the current content) ---
 @app.get("/dataset-info/{dataset_name}")
 async def get_dataset_info(dataset_name: str):
-    """Gets info about the *current state* of the dataset."""
+    """Gets general information about a dataset (DataFrame or Series)."""
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
     try:
-        content = get_current_content(dataset_name) # Handles 404
+        state_entry = datasets_state[dataset_name]
+        content = state_entry["content"]
+        data_type = state_entry["type"]
 
-        # Wrap the core pandas logic in its own try-except
-        try:
-             # Analyze the *current* content
-             df = pd.read_csv(io.BytesIO(content))
+        # Use pandas to calculate info from the current CSV content
+        df = pd.read_csv(io.BytesIO(content)) # Read as DataFrame regardless of type for now
+        total_rows = len(df)
+        column_count = len(df.columns)
 
-             # ... (rest of the info calculation logic remains the same) ...
-             if df.empty: return { "dataset_name": dataset_name, "row_count": 0, "column_count": 0, "memory_usage_bytes": 0, "column_types": {}, "numeric_columns": [], "categorical_columns": [], "datetime_columns": [], "other_columns": [], "missing_values_count": {}, "missing_values_percentage": {}, "unique_value_summary": {} }
-             numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-             categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-             datetime_cols = df.select_dtypes(include=['datetime', 'datetimetz']).columns.tolist()
-             other_cols = df.select_dtypes(exclude=[np.number, 'object', 'category', 'datetime', 'datetimetz']).columns.tolist()
-             column_types = {col: str(df[col].dtype) for col in df.columns}
-             missing_values = df.isnull().sum().to_dict()
-             total_rows = len(df)
-             unique_counts = {}
-             for col in df.columns:
-                 if total_rows > 0 and total_rows < 50000:
+        if df.empty:
+            return {
+                "dataset_name": dataset_name, "dataset_type": data_type,
+                "row_count": 0, "column_count": column_count, "memory_usage_bytes": 0,
+                "column_types": {}, "numeric_columns": [], "categorical_columns": [],
+                "datetime_columns": [], "other_columns": [], "missing_values_count": {},
+                "missing_values_percentage": {}, "unique_value_summary": {}
+            }
+
+        # --- DataFrame Specific Info ---
+        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        datetime_cols = df.select_dtypes(include=['datetime', 'datetimetz']).columns.tolist()
+        other_cols = df.select_dtypes(exclude=[np.number, 'object', 'category', 'datetime', 'datetimetz']).columns.tolist()
+        column_types = {col: str(df[col].dtype) for col in df.columns}
+        missing_values = df.isnull().sum().to_dict()
+        missing_percent = {k: round((v / total_rows * 100), 2) if total_rows > 0 else 0 for k, v in missing_values.items()}
+
+        # Unique value summary (only for DataFrames or if Series treated as DF)
+        unique_counts = {}
+        if data_type == "dataframe": # Only compute detailed unique for dataframes for now
+            for col in df.columns:
+                if total_rows > 0 and total_rows < 50000: # Limit unique check for performance
                     try:
                         nunique = df[col].nunique()
                         unique_counts[col] = {"total_unique": nunique}
-                        if nunique < 100:
-                             value_counts = df[col].value_counts().head(10).to_dict()
-                             unique_counts[col]["values"] = {str(k): v for k, v in value_counts.items()}
+                        if nunique < 100: # Show top 10 values if cardinality is low
+                            value_counts = df[col].value_counts().head(10).to_dict()
+                            # Ensure keys/values are JSON serializable
+                            unique_counts[col]["values"] = {str(k): int(v) if isinstance(v, (np.integer, np.int64)) else v for k, v in value_counts.items()}
                     except Exception as unique_err:
-                         print(f"Could not calculate unique counts for column '{col}': {unique_err}")
-                         unique_counts[col] = {"error": "Could not calculate"}
+                        print(f"Could not calculate unique counts for column '{col}': {unique_err}")
+                        unique_counts[col] = {"error": "Could not calculate"}
 
-             return {
-                 "dataset_name": dataset_name, "row_count": total_rows, "column_count": len(df.columns),
-                 "memory_usage_bytes": int(df.memory_usage(deep=True).sum()), "column_types": column_types,
-                 "numeric_columns": numeric_cols, "categorical_columns": categorical_cols, "datetime_columns": datetime_cols,
-                 "other_columns": other_cols, "missing_values_count": missing_values,
-                 "missing_values_percentage": {k: round((v / total_rows * 100), 2) if total_rows > 0 else 0 for k, v in missing_values.items()},
-                 "unique_value_summary": unique_counts
-             }
-        except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot get info: Invalid CSV format for '{dataset_name}'. {str(pe)}")
-        except Exception as e_inner:
-             print(f"Error calculating dataset info for '{dataset_name}': {type(e_inner).__name__}: {e_inner}")
-             traceback.print_exc()
-             raise HTTPException(status_code=500, detail=f"Error calculating info for '{dataset_name}': {str(e_inner)}")
+        # --- Base Info ---
+        info = {
+            "dataset_name": dataset_name, "dataset_type": data_type,
+            "row_count": total_rows, "column_count": column_count,
+            "memory_usage_bytes": int(df.memory_usage(deep=True).sum()),
+            "column_types": column_types,
+            "missing_values_count": missing_values,
+            "missing_values_percentage": missing_percent,
+        }
 
-    except HTTPException as http_err: raise http_err # Propagate 404 from get_current_content
-    except Exception as e_outer:
-        print(f"Unexpected error in get_dataset_info for '{dataset_name}': {type(e_outer).__name__}: {e_outer}")
+        # Add DataFrame specific fields if applicable
+        if data_type == "dataframe":
+            info.update({
+                "numeric_columns": numeric_cols,
+                "categorical_columns": categorical_cols,
+                "datetime_columns": datetime_cols,
+                "other_columns": other_cols,
+                "unique_value_summary": unique_counts
+            })
+        # If it's a Series, some fields might be simplified or omitted
+        elif data_type == "series" and column_count == 1:
+             series_col_name = df.columns[0]
+             info["series_name"] = series_col_name # Add series name if identifiable
+             # Simplify some fields for series view
+             info["numeric_columns"] = numeric_cols
+             info["categorical_columns"] = categorical_cols
+             info["datetime_columns"] = datetime_cols
+             info["other_columns"] = other_cols
+             # Unique summary for the series itself
+             if total_rows > 0 and total_rows < 50000:
+                 try:
+                     series_col = df[series_col_name]
+                     nunique = series_col.nunique()
+                     unique_counts[series_col_name] = {"total_unique": nunique}
+                     if nunique < 100:
+                         value_counts = series_col.value_counts().head(10).to_dict()
+                         unique_counts[series_col_name]["values"] = {str(k): int(v) if isinstance(v, (np.integer, np.int64)) else v for k, v in value_counts.items()}
+                     info["unique_value_summary"] = unique_counts
+                 except Exception as unique_err:
+                     print(f"Could not calculate unique counts for series '{series_col_name}': {unique_err}")
+                     info["unique_value_summary"] = {series_col_name: {"error": "Could not calculate"}}
+
+
+        return info
+
+    except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot get info: Invalid data format for '{dataset_name}'. {str(pe)}")
+    except Exception as e_inner:
+        print(f"Error calculating dataset info for '{dataset_name}': {type(e_inner).__name__}: {e_inner}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Unexpected server error getting info for '{dataset_name}'.")
+        raise HTTPException(status_code=500, detail=f"Error calculating info for '{dataset_name}': {str(e_inner)}")
 
 
 @app.get("/column-stats/{dataset_name}/{column_name}")
-async def get_column_stats(dataset_name: str, column_name: str, engine: str = "pandas"):
-    """Gets stats for a column from the *current state* of the dataset."""
+async def get_column_stats(dataset_name: str, column_name: str):
+    """Gets detailed statistics for a specific column within a dataset."""
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
     try:
-        content = get_current_content(dataset_name) # Handles 404
-        stats = { "column_name": column_name, "engine_used": engine }
+        state_entry = datasets_state[dataset_name]
+        content = state_entry["content"]
+        data_type = state_entry["type"] # Needed? Column stats are column stats.
 
-        # Always use pandas for stats calculation for simplicity, regardless of 'engine' param
-        # The 'engine' param might be removed later if not used elsewhere for stats
-        try:
-             df = pd.read_csv(io.BytesIO(content))
-             if column_name not in df.columns: raise HTTPException(status_code=404, detail=f"Column '{column_name}' not found in current state of dataset '{dataset_name}'.")
+        # Use pandas for stats calculation
+        df = pd.read_csv(io.BytesIO(content))
+        if column_name not in df.columns:
+            raise HTTPException(status_code=404, detail=f"Column '{column_name}' not found in dataset '{dataset_name}'.")
 
-             # --- Calculate stats using pandas ---
-             column_data = df[column_name].copy()
-             total_rows = len(df)
-             stats.update({
-                 "dtype": str(column_data.dtype),
-                 "missing_count": int(column_data.isnull().sum()),
-                 "missing_percentage": round((column_data.isnull().sum() / total_rows * 100), 2) if total_rows > 0 else 0,
-                 "memory_usage_bytes": int(column_data.memory_usage(deep=True))
-             })
-             # ... (numeric, datetime, categorical logic remains the same) ...
-             if pd.api.types.is_numeric_dtype(column_data.dtype):
-                 desc = column_data.describe()
-                 stats.update({
-                     "mean": float(desc['mean']) if 'mean' in desc else None,
-                     "std": float(desc['std']) if 'std' in desc else None,
-                     "min": float(desc['min']) if 'min' in desc else None,
-                     "max": float(desc['max']) if 'max' in desc else None,
-                     "quantiles": {
-                         "25%": float(desc['25%']) if '25%' in desc else None,
-                         "50%": float(desc['50%']) if '50%' in desc else None, # Median
-                         "75%": float(desc['75%']) if '75%' in desc else None,
-                     }
-                 })
-             elif pd.api.types.is_datetime64_any_dtype(column_data.dtype):
-                  stats.update({
-                      "min_date": str(column_data.min()) if not column_data.isnull().all() else None,
-                      "max_date": str(column_data.max()) if not column_data.isnull().all() else None,
-                  })
-             else: # Assume categorical/object
-                 nunique = column_data.nunique()
-                 stats["unique_count"] = int(nunique)
-                 if nunique < 1000: # Only show top values if cardinality is reasonable
-                     top_values = column_data.value_counts().head(10).to_dict()
-                     stats["top_values"] = {str(k): int(v) for k, v in top_values.items()} # Ensure keys are strings
-
-             # Convert numpy types
-             for key, value in stats.items():
-                 if isinstance(value, (np.integer, np.int64)): stats[key] = int(value)
-                 elif isinstance(value, (np.floating, np.float64)): stats[key] = float(value) if pd.notna(value) else None
-                 elif isinstance(value, np.bool_): stats[key] = bool(value)
-                 elif isinstance(value, dict):
-                      for k, v in value.items():
-                          if isinstance(v, (np.integer, np.int64)): stats[key][k] = int(v)
-                          elif isinstance(v, (np.floating, np.float64)): stats[key][k] = float(v) if pd.notna(v) else None
-
-             return stats
-
-        except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot get stats: Invalid CSV format for '{dataset_name}'. {str(pe)}")
-        except KeyError: raise HTTPException(status_code=404, detail=f"Column '{column_name}' not found in dataset '{dataset_name}'.")
-        except Exception as e_inner:
-             print(f"Error calculating pandas column stats for '{column_name}' in '{dataset_name}': {type(e_inner).__name__}: {e_inner}")
-             traceback.print_exc()
-             raise HTTPException(status_code=500, detail=f"Error calculating stats for column '{column_name}': {str(e_inner)}")
-
-    except HTTPException as http_err: raise http_err # Propagate 404 or 400
-    except Exception as e_outer:
-        print(f"Unexpected error in get_column_stats for '{column_name}' in '{dataset_name}': {type(e_outer).__name__}: {e_outer}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Unexpected server error getting column stats.")
-
-
-# --- Data Transformation Endpoints ---
-
-@app.post("/operation")
-async def perform_operation(
-    dataset_name: str = Form(...),
-    operation: str = Form(...),
-    params: str = Form(...),
-    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
-):
-    """Applies a single operation to the current state and updates the chain."""
-    try:
-        content_before_op = get_current_content(dataset_name) # Content *before* this specific operation
-        params_dict = json.loads(params)
-        new_step_content = None
-        new_full_code = ""
-        preview_info = {}
-
-        # Get the full code chain *before* this operation for the target engine
-        # This handles the engine switch case implicitly
-        full_code_before_op = get_current_full_code(dataset_name, engine)
-
-        if engine == "pandas":
-            df = pd.read_csv(io.BytesIO(content_before_op))
-            result_df, code_snippet = pandas_service.apply_pandas_operation(df, operation, params_dict)
-            with io.BytesIO() as buffer: result_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-            # Build the new full code chain
-            new_full_code = _build_full_code(full_code_before_op, code_snippet, engine)
-
-        elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(content_before_op))
-            result_df, code_snippet = polars_service.apply_polars_operation(df, operation, params_dict)
-            with io.BytesIO() as buffer: result_df.write_csv(buffer); new_step_content = buffer.getvalue()
-            # Build the new full code chain
-            new_full_code = _build_full_code(full_code_before_op, code_snippet, engine)
-
-        elif engine == "sql":
-            con = None
-            try:
-                 con = duckdb.connect(":memory:")
-                 # Load the *original* data if starting a new SQL chain, or ensure base table exists
-                 current_state = get_current_state(dataset_name)
-                 is_new_sql_chain = not current_state or current_state["current_engine"] != "sql"
-
-                 # Define a consistent base table name reference
-                 safe_base_name = re.sub(r'\W|^(?=\d)', '_', dataset_name)
-                 base_table_ref = sql_service._sanitize_identifier(safe_base_name)
-
-                 if is_new_sql_chain:
-                     # Load original data into the base table reference
-                     original_content = datasets[dataset_name]["content"]
-                     sql_service._load_data_to_duckdb(con, safe_base_name, original_content)
-                     # The 'previous' chain is just selecting from the base table
-                     previous_sql_chain = f"SELECT * FROM {base_table_ref}"
-                     # Ensure full_code_before_op reflects this start
-                     full_code_before_op = previous_sql_chain
-                 else:
-                     # Load the base table from the original content for the CTEs to reference
-                     original_content = datasets[dataset_name]["content"]
-                     sql_service._load_data_to_duckdb(con, safe_base_name, original_content)
-                     # The previous chain is the stored full code
-                     previous_sql_chain = full_code_before_op
-
-                 # Apply the SQL operation using the previous chain
-                 preview_data, result_columns, total_rows, generated_new_full_sql, _ = sql_service.apply_sql_operation(
-                     con=con,
-                     previous_sql_chain=previous_sql_chain,
-                     operation=operation,
-                     params=params_dict,
-                     base_table_ref=base_table_ref # Pass the reference name
-                 )
-                 preview_info = { "data": preview_data, "columns": result_columns, "row_count": total_rows }
-                 new_full_code = generated_new_full_sql # The service now returns the full chain
-
-                 # Fetch the full result content for the new state
-                 full_df = con.execute(new_full_code).fetchdf()
-                 with io.BytesIO() as buffer: full_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-
-            finally:
-                 if con: con.close()
-        else:
-             raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
-
-
-        if new_step_content is None: raise ValueError("Operation failed: No new content generated.")
-
-        # Update the central transformation state
-        update_transformation_state(dataset_name, engine, operation, params_dict, new_full_code, new_step_content)
-
-        # Get preview from the final content of this step
-        # Use the current engine for preview generation consistency
-        final_preview_info = _get_preview_from_content(new_step_content, engine)
-
-        # Determine undo/reset status after update
-        current_state_after = get_current_state(dataset_name)
-        can_undo_after = bool(current_state_after and current_state_after.get("history"))
-        can_reset_after = bool(current_state_after)
-
-        return {
-            "data": final_preview_info["data"], "columns": final_preview_info["columns"], "row_count": final_preview_info["row_count"],
-            "code": new_full_code, # Return the new full code chain
-            "can_undo": can_undo_after,
-            "can_reset": can_reset_after
+        column_data = df[column_name].copy()
+        total_rows = len(df)
+        stats = {
+            "column_name": column_name,
+            "dataset_name": dataset_name,
+            "dtype": str(column_data.dtype),
+            "missing_count": int(column_data.isnull().sum()),
+            "missing_percentage": round((column_data.isnull().sum() / total_rows * 100), 2) if total_rows > 0 else 0,
+            "memory_usage_bytes": int(column_data.memory_usage(deep=True))
         }
-    # More specific error catching
-    except (ValueError, pl.exceptions.PolarsError, duckdb.Error, ParserError, EmptyDataError, NotImplementedError, TypeError, DataError, KeyError, json.JSONDecodeError) as op_err:
-         err_type = type(op_err).__name__
-         err_msg = str(op_err)
-         status_code = 400 # Assume client error for these types
-         detail = f"Operation '{operation}' failed ({engine}): {err_type}: {err_msg}"
-         if isinstance(op_err, KeyError): detail = f"Operation '{operation}' failed ({engine}): Column/Key not found: {err_msg}"
-         elif isinstance(op_err, (TypeError, DataError)): detail = f"Operation '{operation}' failed ({engine}): Invalid data type or parameters. Details: {err_msg}"
-         elif isinstance(op_err, json.JSONDecodeError): detail = f"Operation '{operation}' failed: Invalid parameters JSON. {err_msg}"
-         elif isinstance(op_err, duckdb.BinderException): detail = f"Operation '{operation}' failed (SQL Binder Error): {err_msg}. Check names/types."
-         print(f"Handled Operation Error: {detail}")
-         traceback.print_exc() # Log full traceback for server debugging
-         raise HTTPException(status_code=status_code, detail=detail)
-    except HTTPException as http_err: raise http_err
-    except Exception as e:
-        print(f"Unexpected error in /operation ({engine}, {operation}): {type(e).__name__}: {e}")
+
+        # Calculate type-specific stats
+        if pd.api.types.is_numeric_dtype(column_data.dtype):
+            desc = column_data.describe()
+            stats.update({
+                "mean": float(desc['mean']) if pd.notna(desc.get('mean')) else None,
+                "std": float(desc['std']) if pd.notna(desc.get('std')) else None,
+                "min": float(desc['min']) if pd.notna(desc.get('min')) else None,
+                "max": float(desc['max']) if pd.notna(desc.get('max')) else None,
+                "quantiles": {
+                    "25%": float(desc['25%']) if pd.notna(desc.get('25%')) else None,
+                    "50%": float(desc['50%']) if pd.notna(desc.get('50%')) else None, # Median
+                    "75%": float(desc['75%']) if pd.notna(desc.get('75%')) else None,
+                }
+            })
+        elif pd.api.types.is_datetime64_any_dtype(column_data.dtype):
+            stats.update({
+                "min_date": str(column_data.min()) if not column_data.isnull().all() else None,
+                "max_date": str(column_data.max()) if not column_data.isnull().all() else None,
+            })
+        else: # Assume categorical/object/other
+            nunique = column_data.nunique()
+            stats["unique_count"] = int(nunique)
+            if nunique < 1000 and total_rows > 0: # Only show top values if cardinality is reasonable
+                top_values = column_data.value_counts().head(10).to_dict()
+                stats["top_values"] = {str(k): int(v) for k, v in top_values.items()} # Ensure keys are strings, values are ints
+
+        # Convert numpy types before returning for JSON serialization
+        for key, value in stats.items():
+            if isinstance(value, (np.integer, np.int64)): stats[key] = int(value)
+            elif isinstance(value, (np.floating, np.float64)): stats[key] = float(value) if pd.notna(value) else None
+            elif isinstance(value, np.bool_): stats[key] = bool(value)
+            elif isinstance(value, dict): # Handle quantiles and top_values
+                stats[key] = {str(k): (int(v) if isinstance(v, (np.integer, np.int64)) else float(v) if isinstance(v, (np.floating, np.float64)) and pd.notna(v) else None if isinstance(v, (np.floating, np.float64)) else v) for k, v in value.items()}
+
+        return stats
+    except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot get stats: Invalid data format for '{dataset_name}'. {str(pe)}")
+    except KeyError: raise HTTPException(status_code=404, detail=f"Column '{column_name}' not found in dataset '{dataset_name}'.")
+    except Exception as e_inner:
+        print(f"Error calculating column stats for '{column_name}' in '{dataset_name}': {type(e_inner).__name__}: {e_inner}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred during '{operation}'.")
+        raise HTTPException(status_code=500, detail=f"Error calculating stats for column '{column_name}': {str(e_inner)}")
+
+
+# --- Data Transformation Endpoint (Centralized) ---
 
 @app.post("/execute-code")
 async def execute_custom_code(
-    dataset_name: str = Form(...),
-    code: str = Form(...), # User provides the full code/query they want to run
-    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
+    code: str = Form(...),
+    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"]),
+    # Optional: hint which dataset the user is currently viewing, for preview return preference
+    current_view_name: Optional[str] = Form(None)
 ):
-    """Executes custom code, replacing the current transformation chain."""
+    """Executes custom code (Pandas, Polars, SQL), potentially creating/modifying multiple datasets."""
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="Code cannot be empty.")
+
+    # --- Prepare Execution Environment ---
+    exec_globals = {}
+    local_vars = {}
+    modified_or_created_datasets = set() # Track names of datasets affected
+    primary_result_name = current_view_name # Default preview target
+    primary_result_type = datasets_state.get(current_view_name, {}).get("type") if current_view_name else None
+    primary_result_content = None
+
+    # Store original state keys before execution
+    initial_dataset_keys = set(datasets_state.keys())
+
     try:
-        # Custom code execution *replaces* the existing chain.
-        # It operates on the *original* dataset content.
-        if dataset_name not in datasets:
-             raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
-        original_content = datasets[dataset_name]["content"]
-
-        new_content = None
-        result_data = None
-        columns = []
-        row_count = 0
-        executed_code = code # The code to store is the code executed
-
+        # 1. Load all current datasets into the environment
         if engine == "pandas":
-            local_vars = {}
-            exec("import pandas as pd\nimport io\nimport numpy as np", {"pd": pd, "np": np, "io": io}, local_vars)
-            # Execute assuming 'df' is loaded from original_content
-            exec(f"df = pd.read_csv(io.BytesIO(original_content))", {"pd": pd, "io": io, "original_content": original_content}, local_vars)
-            exec(code, {"pd": pd, "np": np, "io": io}, local_vars) # Pass safe modules
-            result_df = local_vars.get('df')
-            if not isinstance(result_df, pd.DataFrame): raise ValueError("Pandas code must result in a DataFrame assigned to 'df'.")
-            with io.BytesIO() as buffer: result_df.to_csv(buffer, index=False); new_content = buffer.getvalue()
-            result_data = result_df.head(100).replace([np.inf, -np.inf], None).fillna('NaN').to_dict(orient="records")
-            columns, row_count = list(result_df.columns), len(result_df)
-            # The 'full code' is the load statement + the executed code
-            load_code = _get_load_code(dataset_name, engine, original_content)
-            executed_code = f"{load_code}\n# --- Custom Code Start ---\n{code}\n# --- Custom Code End ---"
+            exec_globals = {"pd": pd, "np": np, "io": io}
+            for name, state in datasets_state.items():
+                var_name = _sanitize_variable_name(name)
+                try:
+                    # Load based on stored type
+                    df_or_series: Union[pd.DataFrame, pd.Series]
+                    df_temp = pd.read_csv(io.BytesIO(state["content"]))
+                    if state["type"] == "series" and len(df_temp.columns) == 1:
+                        df_or_series = df_temp.iloc[:, 0] # Convert back to Series
+                        df_or_series.name = df_temp.columns[0] # Preserve name
+                    else:
+                        df_or_series = df_temp # Keep as DataFrame
+                    local_vars[var_name] = df_or_series
+                    print(f"Loaded '{name}' ({state['type']}) as pandas var '{var_name}' ({type(df_or_series).__name__})")
+                except Exception as load_err:
+                    print(f"Warning: Failed to load dataset '{name}' for pandas execution: {load_err}")
+                    # Provide empty DataFrame/Series on load error? Or skip? Let's skip for now.
+                    # local_vars[var_name] = pd.DataFrame() if state.get("type", "dataframe") == "dataframe" else pd.Series(dtype='object')
 
         elif engine == "polars":
-             local_vars = {}
-             exec("import polars as pl\nimport io", {"pl": pl, "io": io}, local_vars)
-             exec(f"df = pl.read_csv(io.BytesIO(original_content))", {"pl": pl, "io": io, "original_content": original_content}, local_vars)
-             exec(code, {"pl": pl, "io": io}, local_vars)
-             result_df = local_vars.get('df')
-             if not isinstance(result_df, pl.DataFrame): raise ValueError("Polars code must result in a DataFrame assigned to 'df'.")
-             with io.BytesIO() as buffer: result_df.write_csv(buffer); new_content = buffer.getvalue()
-             result_data = result_df.head(100).fill_nan('NaN').to_dicts()
-             columns, row_count = result_df.columns, result_df.height
-             load_code = _get_load_code(dataset_name, engine, original_content)
-             executed_code = f"{load_code}\n# --- Custom Code Start ---\n{code}\n# --- Custom Code End ---"
+            exec_globals = {"pl": pl, "io": io}
+            for name, state in datasets_state.items():
+                var_name = _sanitize_variable_name(name)
+                try:
+                    # Polars reads bytes directly. Assume DataFrame for now.
+                    # TODO: Add Polars Series handling if needed.
+                    if state["type"] == "series":
+                         print(f"Warning: Polars execution currently loads Series '{name}' as a single-column DataFrame '{var_name}'.")
+                    df = pl.read_csv(state["content"]) # Polars reads bytes
+                    local_vars[var_name] = df
+                    print(f"Loaded '{name}' ({state['type']}) as polars var '{var_name}'")
+                except Exception as load_err:
+                    print(f"Warning: Failed to load dataset '{name}' for polars execution: {load_err}")
+                    # local_vars[var_name] = pl.DataFrame()
 
         elif engine == "sql":
-            # SQL code is assumed to be a SELECT query operating on the base table
-            con = None
+            # SQL execution uses DuckDB connection
+            con = duckdb.connect(":memory:")
+            # Load all datasets as tables (use original name)
+            loaded_tables = set() # Keep track of successfully loaded tables
+            for name, state in datasets_state.items():
+                # Use original dataset name directly as table name
+                table_name = name
+                try:
+                    # Load content into DuckDB table using pandas for robustness
+                    df_for_sql = pd.read_csv(io.BytesIO(state["content"]))
+                    con.register(table_name, df_for_sql)
+                    print(f"Loaded '{name}' ({state['type']}) as SQL table '{table_name}'")
+                    loaded_tables.add(table_name)
+                except Exception as load_err:
+                    print(f"Warning: Failed to load dataset '{name}' for SQL execution: {load_err}")
+            # Globals not used directly for SQL execution string
+
+            # --- Execute Code ---
+            final_result_df = None
             try:
-                 con = duckdb.connect(":memory:")
-                 safe_base_name = re.sub(r'\W|^(?=\d)', '_', dataset_name)
-                 base_table_ref = sql_service._sanitize_identifier(safe_base_name)
-                 sql_service._load_data_to_duckdb(con, safe_base_name, original_content)
+                # Execute the whole block. DuckDB handles multiple statements separated by ;
+                # Use sql() which can return results for the last statement
+                query_result = con.sql(code) # Changed from con.execute()
 
-                 # Execute the user's query
-                 preview_data, columns, row_count = sql_service._execute_sql_query(con, code)
-                 result_data = preview_data
+                # Check if the last statement returned results (likely a SELECT)
+                if query_result:
+                    try:
+                        final_result_df = query_result.fetchdf()
+                        print(f"SQL code execution resulted in a DataFrame with {len(final_result_df)} rows.")
+                    except Exception as fetch_err:
+                        print(f"Warning: Could not fetch DataFrame from SQL query result: {fetch_err}")
+                        final_result_df = None # Reset if fetch fails
 
-                 # Fetch full result for state update
-                 full_df = con.execute(code).fetchdf()
-                 with io.BytesIO() as buffer: full_df.to_csv(buffer, index=False); new_content = buffer.getvalue()
-                 # The executed code *is* the full code chain in this context
-                 executed_code = f"-- Custom SQL Query on '{dataset_name}'\n{code}"
+                # --- Infer created/modified tables ---
+                # Check for CREATE TABLE statements first (explicit modification)
+                create_table_matches = re.findall(r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([^\s(]+)", code, re.IGNORECASE | re.MULTILINE)
+                for table_match in create_table_matches:
+                    # Basic sanitization: remove quotes if present
+                    created_table_name = table_match.strip().strip('"`')
+                    # Check if it might be schema-qualified (basic check)
+                    if '.' in created_table_name:
+                        created_table_name = created_table_name.split('.')[-1].strip('"`')
 
-            finally:
+                    modified_or_created_datasets.add(created_table_name)
+                    primary_result_name = created_table_name # Assume last created table is primary result
+                    print(f"SQL detected CREATE TABLE: {created_table_name}")
+
+                # --- Handle SELECT results updating state (if no CREATE TABLE) ---
+                if not create_table_matches and final_result_df is not None and not final_result_df.empty:
+                    print("Attempting to update state from SELECT result...")
+                    # Try to determine which original table was primarily queried
+                    # Simple approach: check FROM clause of the *last* statement for known tables
+                    # This requires parsing or making assumptions. Let's use current_view_name hint.
+                    if current_view_name and current_view_name in loaded_tables:
+                        # Basic check: Does the code string contain the current view name (as table)?
+                        # This is weak but avoids complex parsing for now.
+                        # A better check would involve parsing the FROM clause.
+                        if re.search(r"FROM\s+[\"']?" + re.escape(current_view_name) + r"[\"']?(\s|\b|;)", code, re.IGNORECASE):
+                            print(f"SELECT result seems related to current view '{current_view_name}'. Updating its state.")
+                            modified_or_created_datasets.add(current_view_name)
+                            primary_result_name = current_view_name
+                            # The content will be updated below using final_result_df
+                        else:
+                            print(f"SELECT result detected, but current view '{current_view_name}' not found in FROM clause (basic check). Not updating state.")
+                            # Keep primary_result_name as current_view_name for preview return, but don't modify state
+                    else:
+                        print("SELECT result detected, but no current view hint or hint not loaded. Not updating state.")
+                        # If only one table was loaded, assume result applies to it? Risky.
+                        if len(loaded_tables) == 1:
+                            inferred_target = list(loaded_tables)[0]
+                            print(f"Only one table loaded ('{inferred_target}'). Assuming SELECT result updates it.")
+                            modified_or_created_datasets.add(inferred_target)
+                            primary_result_name = inferred_target
+                        else:
+                            # Don't update state, just return preview
+                            primary_result_name = None # Indicate no specific dataset was updated
+
+
+            except duckdb.Error as sql_err:
                 if con: con.close()
-        else: raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
+                raise sql_err # Re-raise to be caught by outer handler
+
+            # --- Update State from Execution Results ---
+            # Update based on CREATE TABLE or inferred SELECT target
+            for dataset_key_name in modified_or_created_datasets:
+                try:
+                    df_to_save = None
+                    # If it was the target of the SELECT result
+                    if dataset_key_name == primary_result_name and final_result_df is not None:
+                        df_to_save = final_result_df
+                        print(f"Using SELECT result DataFrame for '{dataset_key_name}'.")
+                    else:
+                        # Otherwise, fetch content from the table (must exist if created)
+                        print(f"Fetching content from table '{dataset_key_name}' (likely from CREATE TABLE).")
+                        # Use the raw name for fetching from DuckDB table
+                        df_to_save = con.execute(f"SELECT * FROM {dataset_key_name}").fetchdf()
+
+                    if df_to_save is not None:
+                        new_type, new_content = _determine_type_and_content(df_to_save) # Determine type
+
+                        history = datasets_state.get(dataset_key_name, {}).get("history", [])
+                        if dataset_key_name in datasets_state: # If overwriting
+                            history.append(datasets_state[dataset_key_name]["content"])
+                            history = history[-5:]
+
+                        datasets_state[dataset_key_name] = {
+                            "content": new_content,
+                            "type": new_type,
+                            "origin": "code", # Mark as code-generated/modified
+                            "original_filename": None, # No original file
+                            "history": history,
+                            "sql_chain": None # *** CRITICAL: Clear SQL chain after custom code modification ***
+                        }
+                        print(f"Updated state for dataset: '{dataset_key_name}' ({new_type}). Cleared SQL chain.")
+
+                        # Update primary result info if this was the one identified
+                        if dataset_key_name == primary_result_name:
+                            primary_result_type = new_type
+                            primary_result_content = new_content
+                    else:
+                        print(f"Warning: Could not get DataFrame to save for '{dataset_key_name}'. State not updated.")
+
+                except Exception as sql_update_err:
+                    print(f"Error fetching/updating state for SQL dataset '{dataset_key_name}': {sql_update_err}")
+            if con: con.close() # Close connection after processing
+
+            # --- Prepare Response ---
+            final_datasets_list = sorted(list(datasets_state.keys()))
+            response_preview = {"data": [], "columns": [], "row_count": 0}
+
+            # Try to return preview for the primary result dataset (updated or original view)
+            target_preview_name = primary_result_name if primary_result_name in modified_or_created_datasets else current_view_name
+
+            if target_preview_name and target_preview_name in datasets_state:
+                state_entry = datasets_state[target_preview_name]
+                response_preview = _get_preview_from_content(state_entry["content"], state_entry["type"], limit=100)
+                # If SELECT result was shown but didn't update state, use its preview
+                if target_preview_name == current_view_name and primary_result_name is None and final_result_df is not None:
+                    print(f"Returning preview of SELECT result directly (state not updated).")
+                    temp_type, temp_content = _determine_type_and_content(final_result_df)
+                    response_preview = _get_preview_from_content(temp_content, temp_type, limit=100)
+                    # Don't report undo/reset status for this temporary preview
+                    response_preview["can_undo"] = False
+                    response_preview["can_reset"] = False
 
 
-        if new_content is None: raise ValueError("Code execution failed to produce new content state.")
+            elif final_result_df is not None: # Fallback: preview the SELECT result if nothing else matches
+                print("Returning preview of SELECT result as fallback.")
+                temp_type, temp_content = _determine_type_and_content(final_result_df)
+                response_preview = _get_preview_from_content(temp_content, temp_type, limit=100)
+                target_preview_name = "[SELECT Result]" # Indicate it's not a saved dataset
 
-        # Update state - this replaces any previous chain
-        update_transformation_state(dataset_name, engine, "custom_code", code, executed_code, new_content)
 
-        # Determine undo/reset status after update
-        current_state_after = get_current_state(dataset_name)
-        can_undo_after = bool(current_state_after and current_state_after.get("history"))
-        can_reset_after = bool(current_state_after)
+            # Get undo/reset status for the dataset whose preview is being returned
+            can_undo = False
+            can_reset = False
+            if target_preview_name and target_preview_name in datasets_state:
+                can_undo = bool(datasets_state[target_preview_name].get("history"))
+                can_reset = bool(datasets_state[target_preview_name].get("history")) # Reset clears history
+
+            return {
+                "message": f"SQL code executed. Updated/Created: {', '.join(sorted(list(modified_or_created_datasets))) if modified_or_created_datasets else 'None'}.",
+                "datasets": final_datasets_list,
+                "primary_result_name": target_preview_name, # Hint to frontend which preview is returned
+                "primary_result_type": datasets_state.get(target_preview_name, {}).get("type") if target_preview_name in datasets_state else (temp_type if 'temp_type' in locals() else None),
+                "preview": response_preview.get("data", []),
+                "columns": response_preview.get("columns", []),
+                "row_count": response_preview.get("row_count", 0),
+                "can_undo": can_undo,
+                "can_reset": can_reset,
+            }
+
+        # --- Identify Assignment Targets (for Pandas/Polars) ---
+        assigned_vars = set()
+        if engine in ["pandas", "polars"]:
+            try:
+                tree = ast.parse(code)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                assigned_vars.add(target.id)
+                    # Handle assignments via attribute (e.g., df['new_col'] = ...) - harder to track perfectly
+                    # elif isinstance(node, ast.Assign):
+                    #     if isinstance(node.targets[0], ast.Subscript) and isinstance(node.targets[0].value, ast.Name):
+                    #         # This detects df['col'] = ..., potentially modifying existing df
+                    #         assigned_vars.add(node.targets[0].value.id) # Mark the base df as potentially modified
+            except SyntaxError:
+                pass # Let exec handle the syntax error reporting
+            print(f"Identified potential assignment targets: {assigned_vars}")
+
+
+        # --- Execute Code ---
+        if engine in ["pandas", "polars"]:
+            exec(code, exec_globals, local_vars)
+        elif engine == "sql":
+            try:
+                # Execute the whole block. DuckDB handles multiple statements separated by ;
+                # Use execute_many if needed, but execute should handle it.
+                con.execute(code)
+
+                # Infer created/modified tables (simplified check)
+                # Check for CREATE TABLE statements
+                create_table_matches = re.findall(r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([^\s(]+)", code, re.IGNORECASE)
+                for table_match in create_table_matches:
+                    created_table_name = table_match.strip('"`') # Remove quotes
+                    modified_or_created_datasets.add(created_table_name)
+                    primary_result_name = created_table_name # Assume last created table is primary result
+                    print(f"SQL detected CREATE TABLE: {created_table_name}")
+                # We can't easily detect which tables were modified by UPDATE/DELETE/INSERT via `execute`
+                # Assume SELECT queries don't modify state directly (user should use CREATE TABLE AS)
+                # If no CREATE TABLE, maybe the last SELECT result is the primary? Hard to tell.
+
+            except duckdb.Error as sql_err:
+                 if con: con.close()
+                 raise sql_err # Re-raise to be caught by outer handler
+
+        # --- Update State from Execution Results ---
+        if engine in ["pandas", "polars"]:
+            # Check local_vars for new or modified DataFrames/Series
+            for var_name, value in local_vars.items():
+                is_df = isinstance(value, pd.DataFrame if engine == "pandas" else pl.DataFrame)
+                is_series = isinstance(value, pd.Series) # Check for Series (Pandas only for now)
+
+                if is_df or is_series:
+                    # Find the original dataset name if it exists (mapping sanitized var_name back)
+                    original_name = next((name for name, state in datasets_state.items() if _sanitize_variable_name(name) == var_name), None)
+                    # Determine the key name for the state dictionary
+                    dataset_key_name = original_name if original_name else var_name # Use original name if exists, else new var name
+
+                    # Was this variable assigned to, or is it a new variable?
+                    is_new_var = dataset_key_name not in initial_dataset_keys
+                    was_assigned = var_name in assigned_vars
+
+                    # Heuristic: Update state if the variable was assigned to, OR if it's a new variable.
+                    # This might miss in-place modifications not caught by assignment parsing (e.g., df.dropna(inplace=True))
+                    # A more robust check would compare content, but that's expensive.
+                    if was_assigned or is_new_var:
+                        print(f"Found modified/new {type(value).__name__}: '{var_name}' (maps to key: '{dataset_key_name}')")
+
+                        # Serialize back to CSV bytes and determine type
+                        new_content: Optional[bytes] = None
+                        new_type: Optional[str] = None
+                        try:
+                            if engine == "pandas":
+                                new_type, new_content = _determine_type_and_content(value)
+                            elif engine == "polars" and is_df: # Polars Series handling TBD
+                                new_type = "dataframe" # Assume DF for Polars for now
+                                with io.BytesIO() as buffer:
+                                    value.write_csv(buffer)
+                                    new_content = buffer.getvalue()
+                            # Add Polars Series handling here if needed
+                        except Exception as serialize_err:
+                            print(f"Error serializing result for '{var_name}': {serialize_err}")
+                            continue # Skip updating this one
+
+                        if new_content and new_type:
+                            # Add previous state to history if updating existing
+                            history = datasets_state.get(dataset_key_name, {}).get("history", [])
+                            if dataset_key_name in datasets_state:
+                                history.append(datasets_state[dataset_key_name]["content"])
+                                history = history[-5:] # Limit history size
+
+                            # Update or add to main state
+                            datasets_state[dataset_key_name] = {
+                                "content": new_content,
+                                "type": new_type,
+                                "origin": "code", # Mark as code-generated/modified
+                                "original_filename": None, # No original file
+                                "history": history
+                            }
+                            modified_or_created_datasets.add(dataset_key_name)
+
+                            # Update primary result if this matches the initial view or is the only result
+                            if dataset_key_name == current_view_name:
+                                primary_result_name = current_view_name
+                                primary_result_type = new_type
+                                primary_result_content = new_content
+                            elif len(modified_or_created_datasets) == 1 and is_new_var: # If it's the *only* new dataset created
+                                 primary_result_name = dataset_key_name
+                                 primary_result_type = new_type
+                                 primary_result_content = new_content
+
+
+        elif engine == "sql":
+            # Update state for tables identified as created
+            for table_name in modified_or_created_datasets:
+                 try:
+                     # Fetch content from the created table
+                     df = con.execute(f"SELECT * FROM {sql_service._sanitize_identifier(table_name)}").fetchdf()
+                     new_type, new_content = _determine_type_and_content(df) # Determine type
+
+                     history = datasets_state.get(table_name, {}).get("history", [])
+                     if table_name in datasets_state: # If overwriting via CREATE OR REPLACE
+                         history.append(datasets_state[table_name]["content"])
+                         history = history[-5:]
+
+                     datasets_state[table_name] = {
+                         "content": new_content,
+                         "type": new_type,
+                         "origin": "code", # Or 'sql'? Let's use 'code'
+                         "original_filename": None,
+                         "history": history
+                     }
+                     print(f"Updated state for SQL created table: '{table_name}' ({new_type})")
+                     # Update primary result info if this was the one identified
+                     if table_name == primary_result_name:
+                         primary_result_type = new_type
+                         primary_result_content = new_content
+
+                 except Exception as sql_update_err:
+                     print(f"Error fetching/updating state for SQL table '{table_name}': {sql_update_err}")
+            if con: con.close() # Close connection after processing
+
+        # --- Prepare Response ---
+        final_datasets_list = sorted(list(datasets_state.keys()))
+        response_preview = {"data": [], "columns": [], "row_count": 0}
+
+        # Try to return preview for the primary result dataset
+        if primary_result_name and primary_result_content and primary_result_type:
+            response_preview = _get_preview_from_content(primary_result_content, primary_result_type, limit=100)
+        elif modified_or_created_datasets:
+            # Fallback: return preview of the first modified/created dataset alphabetically
+            first_result_name = next(iter(sorted(list(modified_or_created_datasets))), None)
+            if first_result_name and first_result_name in datasets_state:
+                 primary_result_name = first_result_name
+                 state_entry = datasets_state[first_result_name]
+                 response_preview = _get_preview_from_content(state_entry["content"], state_entry["type"], limit=100)
+
 
         return {
-            "data": result_data, "columns": columns, "row_count": row_count,
-            "code": executed_code, # Return the full code including load/markers
-            "can_undo": can_undo_after,
-            "can_reset": can_reset_after
+            "message": f"Code executed ({engine}). Updated/Created: {', '.join(sorted(list(modified_or_created_datasets))) if modified_or_created_datasets else 'None'}.",
+            "datasets": final_datasets_list,
+            "primary_result_name": primary_result_name, # Hint to frontend which preview is returned
+            "primary_result_type": datasets_state.get(primary_result_name, {}).get("type") if primary_result_name else None,
+            "preview": response_preview.get("data", []),
+            "columns": response_preview.get("columns", []),
+            "row_count": response_preview.get("row_count", 0),
+            # Include undo/reset status for the primary result?
+            "can_undo": bool(datasets_state.get(primary_result_name, {}).get("history")),
+            "can_reset": bool(datasets_state.get(primary_result_name, {}).get("history")),
         }
-    # Catch specific execution errors
-    except (SyntaxError, NameError, TypeError, ValueError, AttributeError, KeyError, pd.errors.PandasError, pl.exceptions.PolarsError, duckdb.Error) as exec_err:
+
+    except (SyntaxError, NameError, TypeError, ValueError, AttributeError, KeyError, IndexError,
+            pd.errors.PandasError, pl.exceptions.PolarsError if pl else Exception, duckdb.Error) as exec_err:
          traceback.print_exc()
-         raise HTTPException(status_code=400, detail=f"Code execution failed ({engine}): {type(exec_err).__name__}: {str(exec_err)}")
-    except HTTPException as http_err: raise http_err
+         # Close SQL connection on error if it exists
+         if engine == "sql" and 'con' in locals() and con: con.close()
+         detail = f"Code execution failed ({engine}): {type(exec_err).__name__}: {str(exec_err)}"
+         # Improve error message for NameError (suggesting dataset names)
+         if isinstance(exec_err, NameError):
+             available_vars = list(local_vars.keys())
+             detail += f". Available dataset variables in context: {available_vars}"
+         raise HTTPException(status_code=400, detail=detail)
+    except HTTPException as http_err:
+         if engine == "sql" and 'con' in locals() and con: con.close()
+         raise http_err
     except Exception as e:
         print(f"Unexpected error in /execute-code: {type(e).__name__}: {e}")
         traceback.print_exc()
+        if engine == "sql" and 'con' in locals() and con: con.close()
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during code execution.")
 
-# --- Merge/Join Endpoint ---
-@app.post("/merge-datasets")
-async def merge_datasets_endpoint(
-    left_dataset: str = Form(...), # The dataset being modified
-    right_dataset: str = Form(...), # The dataset to join with
-    params: str = Form(...),
-    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
-):
-    """Performs a merge/join, adding a step to the left dataset's chain."""
-    try:
-        params_dict = json.loads(params)
-        # Get current state of LEFT dataset
-        content_left_before_op = get_current_content(left_dataset)
-        full_code_left_before_op = get_current_full_code(left_dataset, engine)
 
-        # Get current state of RIGHT dataset (needed for the operation itself)
-        content_right_current = get_current_content(right_dataset)
-        # We also need the *original* content of the right dataset if the code chain needs it (e.g., SQL)
-        original_content_right = datasets[right_dataset]["content"] if right_dataset in datasets else None
-        if original_content_right is None:
-             raise HTTPException(status_code=404, detail=f"Right dataset '{right_dataset}' original content not found.")
-
-
-        new_step_content = None
-        new_full_code = ""
-
-        if engine == "pandas":
-            df_left = pd.read_csv(io.BytesIO(content_left_before_op))
-            df_right = pd.read_csv(io.BytesIO(content_right_current)) # Join uses current state of right table
-            result_df, code_snippet = pandas_service.apply_pandas_merge(df_left, df_right, params_dict, right_dataset_name=right_dataset)
-            with io.BytesIO() as buffer: result_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-            new_full_code = _build_full_code(full_code_left_before_op, code_snippet, engine)
-
-        elif engine == "polars":
-            df_left = pl.read_csv(io.BytesIO(content_left_before_op))
-            df_right = pl.read_csv(io.BytesIO(content_right_current))
-            result_df, code_snippet = polars_service.apply_polars_join(df_left, df_right, params_dict, right_dataset_name=right_dataset)
-            with io.BytesIO() as buffer: result_df.write_csv(buffer); new_step_content = buffer.getvalue()
-            new_full_code = _build_full_code(full_code_left_before_op, code_snippet, engine)
-
-        elif engine == "sql":
-            con = None
-            try:
-                 con = duckdb.connect(":memory:")
-                 # Define base table names
-                 safe_base_left = re.sub(r'\W|^(?=\d)', '_', left_dataset)
-                 base_table_ref_left = sql_service._sanitize_identifier(safe_base_left)
-                 safe_base_right = re.sub(r'\W|^(?=\d)', '_', right_dataset)
-                 base_table_ref_right = sql_service._sanitize_identifier(safe_base_right)
-
-                 # Load *original* content for both tables
-                 original_content_left = datasets[left_dataset]["content"]
-                 sql_service._load_data_to_duckdb(con, safe_base_left, original_content_left)
-                 sql_service._load_data_to_duckdb(con, safe_base_right, original_content_right)
-
-                 # Get the SQL chain for the left table before this join
-                 current_state_left = get_current_state(left_dataset)
-                 is_new_sql_chain_left = not current_state_left or current_state_left["current_engine"] != "sql"
-                 if is_new_sql_chain_left:
-                     previous_sql_chain_left = f"SELECT * FROM {base_table_ref_left}"
-                     full_code_left_before_op = previous_sql_chain_left # Reset code chain start
-                 else:
-                     previous_sql_chain_left = full_code_left_before_op
-
-                 # Get the SQL chain for the right table (to represent its current state for the join)
-                 # Note: The join operation itself will use the base table ref for the right side,
-                 # but the generated code needs to reflect the conceptual join.
-                 # This is tricky. Let's simplify: SQL join operates on the *base* tables,
-                 # assuming the user wants to join the original datasets.
-                 # If they want to join transformed states, they should save them first.
-                 # TODO: Revisit joining transformed SQL states later if needed.
-
-                 # Apply the join operation
-                 # The 'previous_sql_chain' here refers to the left table's state before the join
-                 preview_data, result_columns, total_rows, generated_new_full_sql, _ = sql_service.apply_sql_join(
-                     con=con,
-                     previous_sql_chain_left=previous_sql_chain_left, # Chain for left table
-                     right_table_ref=base_table_ref_right, # Use base ref for right table
-                     params=params_dict,
-                     base_table_ref_left=base_table_ref_left,
-                     # We might need columns from the right base table for validation inside apply_sql_join
-                 )
-                 new_full_code = generated_new_full_sql # Service returns the new full chain for the left table
-
-                 # Fetch full result content
-                 full_df = con.execute(new_full_code).fetchdf()
-                 with io.BytesIO() as buffer: full_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-
-            finally:
-                 if con: con.close()
-        else: raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
-
-
-        if new_step_content is None: raise ValueError("Merge failed internally.")
-
-        # Update state of the *left* dataset
-        update_transformation_state(left_dataset, engine, "merge", params_dict, new_full_code, new_step_content)
-
-        final_preview_info = _get_preview_from_content(new_step_content, engine)
-        current_state_after = get_current_state(left_dataset)
-        can_undo_after = bool(current_state_after and current_state_after.get("history"))
-        can_reset_after = bool(current_state_after)
-
-        return {
-            "message": f"Merged {left_dataset} and {right_dataset}. Result updated for {left_dataset}.",
-            "data": final_preview_info["data"], "columns": final_preview_info["columns"], "row_count": final_preview_info["row_count"],
-            "code": new_full_code,
-            "can_undo": can_undo_after,
-            "can_reset": can_reset_after
-        }
-    except (ValueError, pl.exceptions.PolarsError, duckdb.Error, pd.errors.PandasError, KeyError, json.JSONDecodeError) as ve:
-         traceback.print_exc()
-         detail = f"Merge failed ({engine}): {type(ve).__name__}: {str(ve)}"
-         if isinstance(ve, KeyError): detail = f"Merge failed ({engine}): Join key not found: {str(ve)}"
-         elif isinstance(ve, json.JSONDecodeError): detail = f"Merge failed: Invalid parameters JSON. {str(ve)}"
-         raise HTTPException(status_code=400, detail=detail)
-    except HTTPException as http_err: raise http_err
-    except Exception as e:
-        print(f"Unexpected error in /merge-datasets: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during merge.")
-
-
-# --- Regex Operation Endpoint ---
-@app.post("/regex-operation")
-async def regex_operation(
-    dataset_name: str = Form(...),
-    operation: str = Form(...), # e.g., "filter", "extract", "replace"
-    params: str = Form(...),
-    engine: str = Form(default="pandas", enum=["pandas", "polars", "sql"])
-):
-    """Applies a regex operation as a step in the chain."""
-    try:
-        content_before_op = get_current_content(dataset_name)
-        full_code_before_op = get_current_full_code(dataset_name, engine)
-        params_dict = json.loads(params)
-        new_step_content = None
-        new_full_code = ""
-        operation_name = f"regex_{operation}" # For history tracking
-
-        if engine == "pandas":
-            df = pd.read_csv(io.BytesIO(content_before_op))
-            result_df, code_snippet = pandas_service.apply_regex_operation(df, operation, params_dict)
-            with io.BytesIO() as buffer: result_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-            new_full_code = _build_full_code(full_code_before_op, code_snippet, engine)
-
-        elif engine == "polars":
-            df = pl.read_csv(io.BytesIO(content_before_op))
-            result_df, code_snippet = polars_service.apply_regex_operation(df, operation, params_dict)
-            with io.BytesIO() as buffer: result_df.write_csv(buffer); new_step_content = buffer.getvalue()
-            new_full_code = _build_full_code(full_code_before_op, code_snippet, engine)
-
-        elif engine == "sql":
-            con = None
-            try:
-                 con = duckdb.connect(":memory:")
-                 current_state = get_current_state(dataset_name)
-                 is_new_sql_chain = not current_state or current_state["current_engine"] != "sql"
-                 safe_base_name = re.sub(r'\W|^(?=\d)', '_', dataset_name)
-                 base_table_ref = sql_service._sanitize_identifier(safe_base_name)
-
-                 if is_new_sql_chain:
-                     original_content = datasets[dataset_name]["content"]
-                     sql_service._load_data_to_duckdb(con, safe_base_name, original_content)
-                     previous_sql_chain = f"SELECT * FROM {base_table_ref}"
-                     full_code_before_op = previous_sql_chain
-                 else:
-                     original_content = datasets[dataset_name]["content"]
-                     sql_service._load_data_to_duckdb(con, safe_base_name, original_content)
-                     previous_sql_chain = full_code_before_op
-
-                 # Use the generic apply_sql_operation for regex as well
-                 preview_data, result_columns, total_rows, generated_new_full_sql, _ = sql_service.apply_sql_operation(
-                     con=con,
-                     previous_sql_chain=previous_sql_chain,
-                     operation=operation_name, # Pass specific regex op type like 'regex_filter'
-                     params=params_dict,
-                     base_table_ref=base_table_ref
-                 )
-                 new_full_code = generated_new_full_sql
-
-                 full_df = con.execute(new_full_code).fetchdf()
-                 with io.BytesIO() as buffer: full_df.to_csv(buffer, index=False); new_step_content = buffer.getvalue()
-            finally:
-                 if con: con.close()
-        else: raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
-
-
-        if new_step_content is None: raise ValueError(f"Regex operation '{operation}' failed internally.")
-
-        update_transformation_state(dataset_name, engine, operation_name, params_dict, new_full_code, new_step_content)
-
-        final_preview_info = _get_preview_from_content(new_step_content, engine)
-        current_state_after = get_current_state(dataset_name)
-        can_undo_after = bool(current_state_after and current_state_after.get("history"))
-        can_reset_after = bool(current_state_after)
-
-        return {
-            "message": f"Successfully applied regex '{operation}' on column '{params_dict.get('column', 'N/A')}'.",
-            "data": final_preview_info.get("data", []), "columns": final_preview_info.get("columns", []), "row_count": final_preview_info.get("row_count", 0),
-            "code": new_full_code,
-            "can_undo": can_undo_after,
-            "can_reset": can_reset_after
-        }
-
-    except (ValueError, TypeError, KeyError, pd.errors.PandasError, pl.exceptions.PolarsError, duckdb.Error, re.error, json.JSONDecodeError) as op_err:
-        traceback.print_exc()
-        detail = f"Regex operation '{operation}' failed ({engine}): {type(op_err).__name__}: {str(op_err)}"
-        if isinstance(op_err, KeyError): detail = f"Regex operation failed: Column not found: {str(op_err)}"
-        elif isinstance(op_err, re.error): detail = f"Regex operation failed: Invalid pattern: {str(op_err)}"
-        elif isinstance(op_err, json.JSONDecodeError): detail = f"Regex operation failed: Invalid parameters JSON. {str(op_err)}"
-        raise HTTPException(status_code=400, detail=detail)
-    except HTTPException as http_err: raise http_err
-    except Exception as e:
-        print(f"Unexpected error in /regex-operation ({engine}, {operation}): {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An unexpected server error during regex.")
-
-
-# --- Relational Algebra Endpoints ---
-# RA operations are treated as one-off transformations creating a *new* dataset,
-# they don't modify the chain of existing datasets.
-# Keep /relational-operation-preview and /save-ra-result as they were.
+# --- Relational Algebra Endpoints (Updated for multi-dataset state) ---
 @app.post("/relational-operation-preview")
 async def preview_relational_operation(
     operation: str = Form(...),
     params: str = Form(...),
-    base_dataset_name: str = Form(...), # Still required
+    # Base dataset is now a list potentially, but preview usually starts from one
+    base_dataset_names_json: str = Form(...), # JSON list of names, e.g., ["dataset1", "dataset2"]
     current_sql_state: Optional[str] = Form(None),
     step_alias_base: str = Form("step")
 ):
-    # ... (Keep existing RA preview logic - it uses its own temporary state) ...
+    """Previews a relational algebra operation using DuckDB."""
     con = None
     try:
         params_dict = json.loads(params)
-        if not base_dataset_name: raise HTTPException(status_code=400, detail="RA preview requires 'base_dataset_name'.")
+        base_dataset_names = json.loads(base_dataset_names_json)
+        if not isinstance(base_dataset_names, list) or not base_dataset_names:
+             raise HTTPException(status_code=400, detail="RA preview requires 'base_dataset_names_json' (list).")
+
+        # For preview, we often start from one dataset or the result of a previous step.
+        # The first name in the list is typically the primary input unless current_sql_state exists.
+        primary_base_name = base_dataset_names[0]
+        if primary_base_name not in datasets_state:
+             raise HTTPException(status_code=404, detail=f"Base dataset '{primary_base_name}' not found.")
 
         con = duckdb.connect(":memory:")
-        internal_load_name = f"__base_{base_dataset_name}"
-        s_internal_load_name = relational_algebra_service._sanitize_identifier(internal_load_name)
-        try:
-            # Use get_current_content to get potentially transformed base data for RA
-            content = get_current_content(base_dataset_name)
-            print(f"DEBUG: Loading base data '{base_dataset_name}' (current state) into table {s_internal_load_name}")
-            relational_algebra_service._load_ra_data(con, internal_load_name, content)
-        except HTTPException as http_err:
-             if http_err.status_code == 404: raise HTTPException(status_code=404, detail=f"Base dataset '{base_dataset_name}' not found.")
-             else: raise http_err
-        except ValueError as load_err: raise HTTPException(status_code=400, detail=f"Failed to load base dataset '{base_dataset_name}': {load_err}")
 
+        # Load ALL specified base datasets into the connection using their original names
+        for name in base_dataset_names:
+             if name not in datasets_state:
+                 raise HTTPException(status_code=404, detail=f"Base dataset '{name}' for RA preview not found.")
+             state_entry = datasets_state[name]
+             print(f"DEBUG (RA Preview): Loading base data '{name}' ({state_entry['type']}) into DuckDB.")
+             relational_algebra_service._load_ra_data(con, name, state_entry["content"]) # Use original name
+
+        # --- RA Preview Logic (largely same as before) ---
         source_sql_or_table: str
         columns_before: List[str] = []
         step_number = 0
 
         if current_sql_state:
+            # Parse previous SQL state to get the source for the next step
             state_strip = current_sql_state.strip()
-            match = re.match(r"\((.*)\)\s+AS\s+\w+\s*$", state_strip, re.DOTALL | re.IGNORECASE)
+            match = re.match(r"\((.*)\)\s+AS\s+([\w`\"']+)\s*$", state_strip, re.DOTALL | re.IGNORECASE)
             if not match:
-                if "SELECT " in state_strip.upper():
-                     print(f"Warning: current_sql_state '{current_sql_state[:100]}...' did not match '(...) AS alias' format, using directly.")
-                     core_previous_sql = state_strip
-                else: raise ValueError(f"Could not parse previous SQL state format: {current_sql_state[:200]}...")
-            else: core_previous_sql = match.group(1).strip()
+                 # Maybe it's just a table name from a previous step? Unlikely with the AS structure.
+                 # Or maybe it's a complex CTE chain? For now, require the (...) AS alias format.
+                 raise ValueError(f"Could not parse previous SQL state format: {current_sql_state[:200]}...")
 
-            alias_match = re.search(rf"{re.escape(step_alias_base)}(\d+)$", state_strip, re.IGNORECASE)
-            step_number = int(alias_match.group(1)) + 1 if alias_match else 1
+            core_previous_sql = match.group(1).strip()
+            alias = match.group(2).strip('"`') # Get alias name
+            num_match = re.search(r"(\d+)$", alias)
+            step_number = int(num_match.group(1)) + 1 if num_match else 1
 
+            # Create a temporary view from the previous step's SQL core
             temp_prev_view = f"__prev_view_{uuid.uuid4().hex[:8]}"
-            print(f"DEBUG: Creating view {temp_prev_view} AS: {core_previous_sql}")
-            try: con.execute(f"CREATE TEMP VIEW {temp_prev_view} AS {core_previous_sql};")
-            except duckdb.Error as view_err: raise ValueError(f"Failed to create view from previous step SQL: {view_err}. SQL was: {core_previous_sql}")
+            print(f"DEBUG (RA Preview): Creating view {temp_prev_view} AS: {core_previous_sql}")
+            try:
+                con.execute(f"CREATE TEMP VIEW {temp_prev_view} AS {core_previous_sql};")
+            except duckdb.Error as view_err:
+                raise ValueError(f"Failed to create view from previous step SQL: {view_err}. SQL was: {core_previous_sql}")
 
             cols_result = con.execute(f"DESCRIBE {temp_prev_view};").fetchall()
             columns_before = [col[0] for col in cols_result]
-            source_sql_or_table = temp_prev_view
+            source_sql_or_table = temp_prev_view # The source for the *new* snippet is the view
 
         else:
+            # No previous state, start from the primary base dataset
             step_number = 0
-            cols_result = con.execute(f"DESCRIBE {s_internal_load_name};").fetchall()
+            s_primary_base_name = primary_base_name
+            cols_result = con.execute(f"DESCRIBE {s_primary_base_name};").fetchall()
             columns_before = [col[0] for col in cols_result]
-            source_sql_or_table = s_internal_load_name
+            source_sql_or_table = s_primary_base_name # Source is the base table itself
 
+        # Handle operations needing column context (like rename)
         if operation.lower() == "rename":
             if not columns_before: raise ValueError("Cannot perform rename: Failed to determine columns from previous step.")
             params_dict["all_columns"] = columns_before
+        # Handle operations needing multiple inputs (like join, union)
+        if operation.lower() in ["join", "union", "intersect", "difference"]:
+             # Ensure required parameters (e.g., other_relation_name) are present and loaded
+             other_rel_name = params_dict.get("other_relation_name")
+             if not other_rel_name: raise ValueError(f"Operation '{operation}' requires 'other_relation_name' in params.")
+             if other_rel_name not in base_dataset_names: raise ValueError(f"Other relation '{other_rel_name}' for '{operation}' not found in loaded base datasets.")
+             # The service function _generate_sql_snippet needs to handle using the correct table names
 
         current_step_alias = f"{step_alias_base}{step_number}"
+        # Generate SQL for the *current* operation, using the determined source
         sql_snippet = relational_algebra_service._generate_sql_snippet(operation, params_dict, source_sql_or_table)
-        print(f"DEBUG: Generated snippet for current step: {sql_snippet}")
+        print(f"DEBUG (RA Preview): Generated snippet for current step: {sql_snippet}")
 
+        # Execute the snippet to get preview data
         preview_data, result_columns, total_rows = relational_algebra_service._execute_preview_query(con, sql_snippet)
-        next_sql_state = f"({sql_snippet}) AS {current_step_alias}"
-        print(f"DEBUG: Generated next_sql_state: {next_sql_state}")
+
+        # Construct the SQL state for the *next* step
+        s_current_step_alias = relational_algebra_service._sanitize_identifier(current_step_alias)
+        next_sql_state = f"({sql_snippet}) AS {s_current_step_alias}"
+        print(f"DEBUG (RA Preview): Generated next_sql_state: {next_sql_state}")
 
         return {
             "message": "RA preview generated successfully.",
             "data": preview_data, "columns": result_columns, "row_count": total_rows,
             "generated_sql_state": next_sql_state,
-            "current_step_sql_snippet": sql_snippet
+            "current_step_sql_snippet": sql_snippet # The SQL for just this step
         }
 
     except (ValueError, duckdb.Error, NotImplementedError, json.JSONDecodeError) as e:
          err_type = type(e).__name__
          detail = f"Relational Algebra preview for '{operation}' failed: {err_type}: {str(e)}"
          print(f"RA Preview Error (400): {detail}")
+         # Add more specific error details if possible
          if isinstance(e, duckdb.BinderException): detail = f"RA preview failed (Binder Error): {str(e)}. Check column/table names/types."
          elif isinstance(e, duckdb.CatalogException): detail = f"RA preview failed (Catalog Error): {str(e)}. Check if table/view exists."
          elif isinstance(e, duckdb.ParserException): detail = f"RA preview failed (Parser Error): {str(e)}. Check syntax."
          elif isinstance(e, json.JSONDecodeError): detail = f"RA preview failed: Invalid parameters JSON. {str(e)}"
-         elif "Cannot perform rename" in str(e): detail = f"RA preview failed: Rename error - {str(e)}"
-         elif "Failed to create view" in str(e): detail = f"RA preview failed: {str(e)}"
          raise HTTPException(status_code=400, detail=detail)
     except HTTPException as http_err: raise http_err
     except Exception as e:
@@ -1207,39 +1190,54 @@ async def preview_relational_operation(
 async def save_relational_algebra_result(
     final_sql_chain: str = Form(...),
     new_dataset_name: str = Form(...),
-    base_dataset_names_json: str = Form(...)
+    base_dataset_names_json: str = Form(...) # Names of datasets used in the chain
 ):
-    # ... (Keep existing RA save logic - creates a new entry in `datasets`) ...
+    """Executes the final RA SQL chain and saves the result as a new dataset."""
     con = None
     try:
         if not new_dataset_name.strip(): raise ValueError("New dataset name cannot be empty.")
         base_dataset_names = json.loads(base_dataset_names_json)
-        if not isinstance(base_dataset_names, list) or not base_dataset_names: raise ValueError("Invalid or empty list of base dataset names provided.")
+        if not isinstance(base_dataset_names, list) or not base_dataset_names:
+            raise ValueError("Invalid or empty list of base dataset names provided.")
 
-        if new_dataset_name in datasets: print(f"Warning: Overwriting dataset '{new_dataset_name}' with RA result save.")
+        if new_dataset_name in datasets_state:
+            print(f"Warning: Overwriting dataset '{new_dataset_name}' with RA result save.")
 
         con = duckdb.connect(":memory:")
+        # Load all necessary base datasets
         for ds_name in base_dataset_names:
-             # Use current content of base datasets for the final execution
-             content = get_current_content(ds_name)
-             relational_algebra_service._load_ra_data(con, ds_name, content)
+             if ds_name not in datasets_state:
+                 raise HTTPException(status_code=404, detail=f"Base dataset '{ds_name}' for RA save not found.")
+             state_entry = datasets_state[ds_name]
+             relational_algebra_service._load_ra_data(con, ds_name, state_entry["content"]) # Use original name
 
         print(f"Executing final RA SQL chain for saving '{new_dataset_name}':\n{final_sql_chain}")
+        # Execute the final SQL chain provided by the frontend
         full_df = con.execute(final_sql_chain).fetchdf()
 
-        with io.BytesIO() as buffer: full_df.to_csv(buffer, index=False); new_content = buffer.getvalue()
+        # Determine type and serialize result to CSV bytes
+        data_type, new_content = _determine_type_and_content(full_df)
+        if data_type == "series":
+             print(f"RA result '{new_dataset_name}' has one column, saving as Series type.")
 
-        # Save as a new base dataset
-        datasets[new_dataset_name] = { "content": new_content, "filename": f"{new_dataset_name}_ra_result.csv" }
-        # Clear any transformations associated with the *new* name
-        if new_dataset_name in transformations: del transformations[new_dataset_name]
+        # Save as a new entry in datasets_state
+        datasets_state[new_dataset_name] = {
+            "content": new_content,
+            "type": data_type,
+            "origin": "ra",
+            "original_filename": f"{new_dataset_name}_ra_result.csv",
+            "history": [] # RA results start with no history
+        }
 
-        saved_preview_info = _get_preview_from_content(new_content, engine="pandas", limit=10)
+        saved_preview_info = _get_preview_from_content(new_content, data_type, limit=100)
         return {
-            "message": f"Successfully saved RA result as '{new_dataset_name}'.",
+            "message": f"Successfully saved RA result as '{new_dataset_name}' ({data_type}).",
             "dataset_name": new_dataset_name,
-            "preview": saved_preview_info["data"], "columns": saved_preview_info["columns"], "row_count": saved_preview_info["row_count"],
-            "datasets": sorted(list(datasets.keys())) # Return updated list
+            "dataset_type": data_type,
+            "preview": saved_preview_info.get("data", []),
+            "columns": saved_preview_info.get("columns", []),
+            "row_count": saved_preview_info.get("row_count", 0),
+            "datasets": sorted(list(datasets_state.keys())) # Return updated list
         }
     except (ValueError, duckdb.Error, json.JSONDecodeError) as e:
          detail = f"Failed to save RA result as '{new_dataset_name}': {str(e)}"
@@ -1252,175 +1250,384 @@ async def save_relational_algebra_result(
         raise HTTPException(status_code=500, detail=f"Unexpected server error during RA save.")
     finally:
         if con: con.close()
-
-
-# --- Undo/Reset/Save Transformation Endpoints ---
-@app.post("/undo/{dataset_name}")
-async def undo_last_operation(
+    
+@app.post("/apply-operation/{dataset_name}")
+async def apply_structured_operation(
     dataset_name: str,
-    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]) # Engine for preview
+    operation: str = Form(...),
+    params_json: str = Form(...), # Parameters as JSON string
+    engine: str = Form(..., enum=["pandas", "sql", "polars"]) # Add polars to enum
 ):
-    """Reverts the dataset to the state before the last operation."""
+    """Applies a structured operation (filter, groupby, sample etc.) using the specified engine."""
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+
+    state_entry = datasets_state[dataset_name]
+    params = {}
     try:
-        current_state = get_current_state(dataset_name)
-        if not current_state or not current_state.get("history"):
-            raise HTTPException(status_code=400, detail="No operations to undo.")
+        params = json.loads(params_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid parameters JSON.")
 
-        # Pop the last saved state from history
-        history = current_state["history"]
-        last_saved_state = history.pop() # This is the state *before* the last operation
+    print(f"Applying Operation: dataset='{dataset_name}', engine='{engine}', operation='{operation}', params='{params}'")
 
-        # Restore the state from the snapshot
-        transformations[dataset_name] = {
-            "current_content": last_saved_state["current_content"],
-            "current_full_code": last_saved_state["current_full_code"],
-            "current_engine": last_saved_state["current_engine"],
-            "history": history # Assign the modified history list back
-        }
-        print(f"Undo successful for {dataset_name}. Rolled back to state after op: {last_saved_state.get('operation_applied', 'N/A')}")
+    # --- Engine Dispatch ---
+    con = None # For SQL
+    result_df = None # For Pandas/Polars
+    generated_code = "" # For Pandas/Polars code snippet
+    new_content = None # Holds resulting CSV bytes
 
-        # Generate preview using the *restored* state and the requested engine
-        restored_content = last_saved_state["current_content"]
-        restored_engine = last_saved_state["current_engine"]
-        preview_info = _get_preview_from_content(restored_content, engine) # Use requested engine for preview
-        restored_full_code = get_current_full_code(dataset_name, engine) # Get code for requested engine
+    try:
+        # --- Common logic for tracking history ---
+        original_content = state_entry["content"]
+        history = state_entry.get("history", [])
 
-        # Determine new undo/reset status
-        can_undo_after = bool(history)
-        can_reset_after = True # Can always reset if there was a state
+        # --- PANDAS ---
+        if engine == "pandas":
+            if state_entry.get("sql_chain"):
+                print(f"Switching '{dataset_name}' from SQL to Pandas. Resetting SQL chain.")
+                state_entry["sql_chain"] = None
+
+            try: df = pd.read_csv(io.BytesIO(original_content))
+            except Exception as load_err: raise HTTPException(status_code=500, detail=f"Pandas: Failed to load current data: {load_err}")
+
+            if operation == 'merge':
+                # ... (keep merge logic as before) ...
+                right_dataset_name = params.get("right_dataset")
+                if not right_dataset_name or right_dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"Pandas Merge: Right dataset '{right_dataset_name}' not found.")
+                try: right_df = pd.read_csv(io.BytesIO(datasets_state[right_dataset_name]["content"]))
+                except Exception as load_err: raise HTTPException(status_code=500, detail=f"Pandas Merge: Failed to load right dataset '{right_dataset_name}': {load_err}")
+                result_df, generated_code = pandas_service.apply_pandas_merge(df, right_df, params)
+            else:
+                # Dispatch to the main pandas operation handler
+                result_df, generated_code = pandas_service.apply_pandas_operation(df, operation, params)
+
+            # Serialize result back to content
+            with io.BytesIO() as buffer:
+                result_df.to_csv(buffer, index=False)
+                new_content = buffer.getvalue()
+            state_entry["sql_chain"] = None # Clear SQL chain
+
+        # --- POLARS ---
+        elif engine == "polars":
+            if state_entry.get("sql_chain"):
+                print(f"Switching '{dataset_name}' from SQL to Polars. Resetting SQL chain.")
+                state_entry["sql_chain"] = None
+
+            try: df = pl.read_csv(original_content) # Polars reads bytes
+            except Exception as load_err: raise HTTPException(status_code=500, detail=f"Polars: Failed to load current data: {load_err}")
+
+            if operation == 'merge':
+                 # ... (Polars join logic) ...
+                right_dataset_name = params.get("right_dataset")
+                if not right_dataset_name or right_dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"Polars Join: Right dataset '{right_dataset_name}' not found.")
+                try: right_df = pl.read_csv(datasets_state[right_dataset_name]["content"])
+                except Exception as load_err: raise HTTPException(status_code=500, detail=f"Polars Join: Failed to load right dataset '{right_dataset_name}': {load_err}")
+                # Assuming a polars_service.apply_polars_join exists similar to pandas
+                # Need to implement apply_polars_join if not already done
+                if hasattr(polars_service, 'apply_polars_join'):
+                     result_df, generated_code = polars_service.apply_polars_join(df, right_df, params)
+                else:
+                     raise NotImplementedError("Polars join/merge function not implemented in polars_service.")
+            else:
+                # Dispatch to the main polars operation handler
+                result_df, generated_code = polars_service.apply_polars_operation(df, operation, params)
+
+            # Serialize result back to content
+            with io.BytesIO() as buffer:
+                result_df.write_csv(buffer)
+                new_content = buffer.getvalue()
+            state_entry["sql_chain"] = None # Clear SQL chain
+
+        # --- SQL ---
+        elif engine == "sql":
+            con = duckdb.connect(":memory:")
+            base_table_name = f"__{dataset_name}_base"
+            base_table_ref = sql_service._sanitize_identifier(base_table_name)
+
+            try: sql_service._load_data_to_duckdb(con, base_table_name, original_content)
+            except Exception as load_err: raise HTTPException(status_code=500, detail=f"SQL: Failed to load current data into DuckDB: {load_err}")
+
+            previous_sql_chain = state_entry.get("sql_chain")
+            if not previous_sql_chain:
+                previous_sql_chain = f"SELECT * FROM {base_table_ref}"
+                print(f"Starting new SQL chain for '{dataset_name}' from base table {base_table_ref}")
+
+            new_full_sql_chain = ""
+            sql_snippet = "" # The CTE definition for this step
+            preview_data = []
+            result_columns = []
+            total_rows = 0
+
+            if operation == 'merge':
+                # ... (keep SQL join logic as before) ...
+                right_dataset_name = params.get("right_dataset")
+                if not right_dataset_name or right_dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"SQL Join: Right dataset '{right_dataset_name}' not found.")
+                right_base_table_name = f"__{right_dataset_name}_base"
+                right_base_table_ref = sql_service._sanitize_identifier(right_base_table_name)
+                try: sql_service._load_data_to_duckdb(con, right_base_table_name, datasets_state[right_dataset_name]["content"])
+                except Exception as load_err: raise HTTPException(status_code=500, detail=f"SQL Join: Failed to load right dataset '{right_dataset_name}': {load_err}")
+                preview_data, result_columns, total_rows, new_full_sql_chain, sql_snippet = sql_service.apply_sql_join(
+                    con=con, previous_sql_chain_left=previous_sql_chain, right_table_ref=right_base_table_ref, params=params, base_table_ref_left=base_table_ref
+                )
+            else:
+                # Dispatch to the main SQL operation handler
+                preview_data, result_columns, total_rows, new_full_sql_chain, sql_snippet = sql_service.apply_sql_operation(
+                    con=con, previous_sql_chain=previous_sql_chain, operation=operation, params=params, base_table_ref=base_table_ref
+                )
+
+            # Materialize Result back to CSV content
+            print(f"Materializing SQL result for '{dataset_name}'...")
+            try:
+                final_df = con.execute(new_full_sql_chain).fetchdf()
+                with io.BytesIO() as buffer:
+                    final_df.to_csv(buffer, index=False)
+                    new_content = buffer.getvalue()
+                print(f"Materialization successful. Size: {len(new_content)} bytes.")
+            except Exception as materialize_err: raise HTTPException(status_code=500, detail=f"SQL: Failed to materialize result: {materialize_err}")
+
+            # Update SQL chain state
+            state_entry["sql_chain"] = new_full_sql_chain
+            generated_code = sql_snippet # Use CTE snippet as the 'code' for SQL step
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
+
+        # --- Update State (Common) ---
+        if new_content is None:
+            raise HTTPException(status_code=500, detail="Operation failed to produce new content.")
+
+        history.append({ # Store previous content for undo
+                "engine": engine,
+                "operation": operation,
+                "params_or_code": params, # Store params used
+                "generated_code_or_snippet": generated_code,
+                "previous_content": original_content, # Store previous content bytes
+                "previous_sql_chain": state_entry.get("sql_chain") if engine != "sql" else previous_sql_chain # Store chain before this step if switching away or continuing sql
+            })
+        state_entry["content"] = new_content
+        state_entry["history"] = history[-10:] # Limit history size
+
+        # --- Prepare Response ---
+        # For Pandas/Polars, generate preview from new_content. For SQL, use preview_data directly.
+        response_preview = {}
+        if engine == "sql":
+            response_preview = {"data": preview_data, "columns": result_columns, "row_count": total_rows}
+        else:
+            response_preview = _get_preview_from_content(new_content, data_type='csv', limit=100)
+
+        can_undo = bool(state_entry.get("history"))
+        # Reset currently means clear history, not revert to original upload.
+        can_reset = bool(state_entry.get("history"))
 
         return {
-            "message": f"Undid last operation", # Removed ({last_op.get('operation', 'N/A')}) as it's complex to track
-            "data": preview_info["data"], "columns": preview_info["columns"], "row_count": preview_info["row_count"],
-            "can_undo": can_undo_after,
-            "can_reset": can_reset_after,
-            "last_code": restored_full_code
+            "message": f"{engine.capitalize()} operation '{operation}' applied successfully to '{dataset_name}'.",
+            "dataset_name": dataset_name,
+            "data": response_preview.get("data", []),
+            "columns": response_preview.get("columns", []),
+            "row_count": response_preview.get("row_count", 0),
+            "can_undo": can_undo,
+            "can_reset": can_reset,
+            "generated_code": generated_code # Code snippet (Pandas/Polars) or CTE (SQL)
+        }
+
+    except (ValueError, pd.errors.PandasError, pl.exceptions.PolarsError if pl else Exception, duckdb.Error, KeyError, NotImplementedError) as op_err:
+        if con: con.close()
+        print(f"Operation Error ({engine}, {operation}): {type(op_err).__name__}: {op_err}")
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Operation failed: {str(op_err)}")
+    except HTTPException as http_err:
+        if con: con.close()
+        raise http_err
+    except Exception as e:
+        if con: con.close()
+        print(f"Unexpected error during operation ({engine}, {operation}): {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during the operation.")
+    finally:
+        if con:
+            try: con.close()
+            except Exception as close_err: print(f"Error closing DuckDB connection: {close_err}")
+
+# --- Undo/Reset/Save Transformation Endpoints (Updated for specific dataset) ---
+@app.post("/undo/{dataset_name}")
+async def undo_last_operation(dataset_name: str):
+    """Reverts the dataset to the state before the last operation (if history exists)."""
+    if dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+    state_entry = datasets_state[dataset_name]
+    history = state_entry.get("history", [])
+    if not history: raise HTTPException(status_code=400, detail=f"No history to undo for dataset '{dataset_name}'.")
+
+    try:
+        last_step = history.pop()
+        previous_content = last_step.get("previous_content")
+        previous_sql_chain = last_step.get("previous_sql_chain") # Get previous chain if stored
+
+        if previous_content is None:
+            # If no previous content stored (old history format?), we can't revert content.
+            # Put the step back and raise an error or just log? Let's log and return error.
+            history.append(last_step) # Put it back
+            print(f"Error during undo for {dataset_name}: History entry missing 'previous_content'.")
+            raise HTTPException(status_code=500, detail="Cannot undo: History data is incomplete.")
+
+        # Restore content and potentially the SQL chain
+        state_entry["content"] = previous_content
+        # Restore SQL chain *only if* the undone step was also SQL or if we are reverting to an SQL state
+        # If the previous step was SQL, `previous_sql_chain` should hold the chain *before* that step.
+        state_entry["sql_chain"] = previous_sql_chain
+
+        print(f"Undo successful for {dataset_name}. Restored content. SQL chain set to: {'Present' if previous_sql_chain else 'None'}")
+
+        data_type = state_entry["type"]
+        preview_info = _get_preview_from_content(previous_content, data_type) # Use data_type here
+
+        return {
+            "message": f"Undid last change for {dataset_name}",
+            "dataset_name": dataset_name, "dataset_type": data_type,
+            "data": preview_info.get("data", []), "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "can_undo": bool(history), "can_reset": bool(history)
         }
     except HTTPException as http_err: raise http_err
     except Exception as e:
         print(f"Error during undo for '{dataset_name}': {type(e).__name__}: {e}")
         traceback.print_exc()
-        # Attempt to restore state? Difficult. Signal failure.
         raise HTTPException(status_code=500, detail=f"An error occurred during undo.")
 
 
 @app.post("/reset/{dataset_name}")
-async def reset_transformations(
-    dataset_name: str,
-    engine: str = Query("pandas", enum=["pandas", "polars", "sql"]) # Engine for preview
-):
-    """Resets the dataset to its original uploaded state."""
+async def reset_transformations(dataset_name: str):
+    """Resets the dataset by clearing its transformation history and SQL chain."""
+    if dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+    state_entry = datasets_state[dataset_name]
+    if not state_entry.get("history"): raise HTTPException(status_code=400, detail=f"Dataset '{dataset_name}' has no history to reset.")
+
     try:
-        if dataset_name not in datasets:
-            raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
-
-        # Remove the transformation state entry entirely
-        if dataset_name in transformations:
-            del transformations[dataset_name]
-            print(f"Reset transformations for '{dataset_name}'")
-        else:
-             # No transformations to reset, but still return the original state preview
-             print(f"No transformations found to reset for '{dataset_name}', showing original.")
-
-
-        # Get original content and generate preview/code for the requested engine
-        original_content = datasets[dataset_name]["content"]
-        preview_info = _get_preview_from_content(original_content, engine)
-        initial_code = _get_load_code(dataset_name, engine, original_content)
+        # Clear history and SQL chain, keep current content
+        state_entry["history"] = []
+        state_entry["sql_chain"] = None
+        current_content = state_entry["content"]
+        data_type = state_entry["type"]
+        print(f"Reset history and SQL chain for '{dataset_name}' (current content kept).")
+        preview_info = _get_preview_from_content(current_content, data_type) # Use data_type
 
         return {
-            "message": f"Reset transformations for {dataset_name}",
-            "data": preview_info["data"], "columns": preview_info["columns"], "row_count": preview_info["row_count"],
-            "can_undo": False, # Reset state has no history
-            "can_reset": False, # Cannot reset further
-            "last_code": initial_code
+            "message": f"Reset history for {dataset_name}",
+            "dataset_name": dataset_name, "dataset_type": data_type,
+            "data": preview_info.get("data", []), "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "can_undo": False, "can_reset": False
         }
-    except HTTPException as http_err: raise http_err
     except Exception as e:
          print(f"Error during reset for '{dataset_name}': {type(e).__name__}: {e}")
          traceback.print_exc()
          raise HTTPException(status_code=500, detail=f"An error occurred during reset.")
 
-@app.post("/save-transformation")
-async def save_transformation(
-    dataset_name: str = Form(...), # The dataset whose current state to save
-    new_dataset_name: str = Form(...),
-    engine: str = Form(default="pandas") # For preview generation of the saved state
-):
-    """Saves the current transformed state as a new base dataset."""
+@app.post("/reset/{dataset_name}")
+async def reset_transformations(dataset_name: str):
+    """Resets the dataset by clearing its transformation history."""
+    # Note: This currently does NOT revert to the original uploaded file content.
+    # It only clears the undo history, keeping the current state.
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+
+    state_entry = datasets_state[dataset_name]
+
+    if not state_entry.get("history"):
+         raise HTTPException(status_code=400, detail=f"Dataset '{dataset_name}' has no history to reset.")
+
     try:
-        content_to_save = get_current_content(dataset_name) # Handles 404 for source
-        if not new_dataset_name.strip(): raise ValueError("New dataset name cannot be empty.")
-        # Add validation?
-        # if not re.match(r"^[a-zA-Z0-9_\-\.]+$", new_dataset_name.strip()): raise ValueError("New name contains invalid characters.")
+        # Clear the history
+        state_entry["history"] = []
+        state_entry["sql_chain"] = None # Clear SQL chain on reset
+        current_content = state_entry["content"] # Keep current content after clearing history
+        print(f"Reset history and SQL chain for '{dataset_name}' (current content kept).")
+        data_type = state_entry["type"]
 
-        if new_dataset_name in datasets: print(f"Warning: Overwriting dataset '{new_dataset_name}' when saving transformation.")
+        print(f"Reset history for '{dataset_name}' (current content kept).")
 
-        # Add to the main datasets registry
-        datasets[new_dataset_name] = { "content": content_to_save, "filename": f"{new_dataset_name}_saved.csv" }
-        # Clear any transformations associated with the *new* name
-        if new_dataset_name in transformations: del transformations[new_dataset_name]
+        preview_info = _get_preview_from_content(current_content, data_type)
 
-        preview_info = _get_preview_from_content(content_to_save, engine, limit=10)
-        # Return updated list of datasets
         return {
-            "message": f"Successfully saved current state of '{dataset_name}' as '{new_dataset_name}'",
-            "dataset_name": new_dataset_name, # Return the new name
-            "preview": preview_info["data"], "columns": preview_info["columns"], "row_count": preview_info["row_count"],
-            "datasets": sorted(list(datasets.keys())) # Send back the updated list
+            "message": f"Reset history for {dataset_name}",
+            "dataset_name": dataset_name,
+            "dataset_type": data_type,
+            "data": preview_info.get("data", []),
+            "columns": preview_info.get("columns", []),
+            "row_count": preview_info.get("row_count", 0),
+            "can_undo": False, # History cleared
+            "can_reset": False # Cannot reset further
         }
-    except (ValueError) as val_err: raise HTTPException(status_code=400, detail=str(val_err))
-    except HTTPException as http_err: raise http_err
     except Exception as e:
-        print(f"Error saving transformation for '{dataset_name}' as '{new_dataset_name}': {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"An error occurred while saving the transformation.")
+         print(f"Error during reset for '{dataset_name}': {type(e).__name__}: {e}")
+         traceback.print_exc()
+         raise HTTPException(status_code=500, detail=f"An error occurred during reset.")
 
 
-# --- Export Endpoint (/export) ---
+# --- Export Endpoint (Operates on current content of specific dataset) ---
 @app.get("/export/{dataset_name}")
 async def export_dataset(
     dataset_name: str,
-    format: str = Query("csv", enum=["csv", "json", "excel"]),
-    engine: str = Query("pandas") # Primarily for non-CSV export loading
+    format: str = Query("csv", enum=["csv", "json", "excel"])
 ):
-    """Exports the *current state* of the dataset."""
+    """Exports the *current state* of the specified dataset."""
+    if dataset_name not in datasets_state:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
+
     try:
-        content = get_current_content(dataset_name) # Handles 404
+        state_entry = datasets_state[dataset_name]
+        content = state_entry["content"]
+        data_type = state_entry["type"]
         file_content: Union[bytes, str]
         media_type: str
-        filename: str
+        filename_base = re.sub(r'[^\w\.\-]', '_', dataset_name) # Sanitize name for filename
 
         if format == "csv":
             media_type="text/csv"
-            filename = f"{dataset_name}_current.csv" # Indicate it's the current state
+            filename = f"{filename_base}_export.csv"
             file_content = content
         else:
-            # Use pandas for consistent non-CSV export of the current state
+            # Use pandas for consistent non-CSV export
             try:
                  df = pd.read_csv(io.BytesIO(content))
                  if format == "json":
                      media_type="application/json"
-                     filename = f"{dataset_name}_current.json"
-                     file_content = df.to_json(orient="records", date_format="iso", default_handler=str, force_ascii=False)
+                     filename = f"{filename_base}_export.json"
+                     # Handle export based on type
+                     if data_type == "series" and len(df.columns) == 1:
+                         # Export Series as a simple JSON list
+                         series = df.iloc[:, 0]
+                         # Handle potential non-serializable data
+                         series_serializable = series.replace([np.inf, -np.inf], None).copy()
+                         if pd.api.types.is_datetime64_any_dtype(series_serializable.dtype):
+                             series_serializable = series_serializable.astype(str)
+                         file_content = series_serializable.to_json(orient="values", default_handler=str, force_ascii=False)
+                     else: # Export DataFrame as records
+                         df_serializable = df.replace([np.inf, -np.inf], None).copy()
+                         for col in df_serializable.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
+                             df_serializable[col] = df_serializable[col].astype(str)
+                         file_content = df_serializable.to_json(orient="records", default_handler=str, force_ascii=False)
+
                  elif format == "excel":
                      media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                     filename = f"{dataset_name}_current.xlsx"
+                     filename = f"{filename_base}_export.xlsx"
                      with io.BytesIO() as buffer:
+                         # Excel export might fail on certain types (e.g., timezone-aware datetime)
+                         # Consider converting types before export if issues arise
                          df.to_excel(buffer, index=False, engine='openpyxl')
                          file_content = buffer.getvalue()
-                 else: raise ValueError(f"Unsupported format: {format}")
-            except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot export: Invalid CSV data for '{dataset_name}'. {str(pe)}")
+                 else:
+                     raise ValueError(f"Unsupported format: {format}")
+            except (ParserError, EmptyDataError) as pe: raise HTTPException(status_code=400, detail=f"Cannot export: Invalid data format for '{dataset_name}'. {str(pe)}")
             except Exception as export_load_err:
                  print(f"Error preparing non-CSV export for '{dataset_name}': {export_load_err}")
                  traceback.print_exc()
                  raise HTTPException(status_code=500, detail=f"Failed to prepare data for {format} export.")
 
-        safe_filename = re.sub(r'[^\w\.\-]', '_', filename)
         return Response(
             content=file_content,
             media_type=media_type,
-            headers={"Content-Disposition": f"attachment; filename=\"{safe_filename}\""}
+            headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
         )
     except HTTPException as http_err: raise http_err
     except Exception as e:
@@ -1429,63 +1636,55 @@ async def export_dataset(
         raise HTTPException(status_code=500, detail=f"Error exporting dataset '{dataset_name}' as {format}.")
 
 
-# --- Dataset Rename / Delete Endpoints ---
+# --- Dataset Rename / Delete Endpoints (Operate on datasets_state) ---
 @app.post("/rename-dataset/{old_dataset_name}")
 async def rename_dataset(
     old_dataset_name: str,
     new_dataset_name: str = Form(...)
 ):
-    """Renames a dataset in both the base registry and transformations."""
+    """Renames a dataset in the main state."""
     try:
         if not old_dataset_name or not new_dataset_name: raise ValueError("Old and new dataset names must be provided.")
         new_name = new_dataset_name.strip()
         if not new_name: raise ValueError("New dataset name cannot be empty.")
-        if not re.match(r"^[a-zA-Z0-9_\-\.]+$", new_name): raise ValueError("New name contains invalid characters.")
-        if old_dataset_name not in datasets: raise HTTPException(status_code=404, detail=f"Dataset '{old_dataset_name}' not found.")
-        if new_name == old_dataset_name: return {"message": f"Dataset name '{old_dataset_name}' unchanged.", "datasets": sorted(list(datasets.keys()))}
-        if new_name in datasets: raise HTTPException(status_code=409, detail=f"Dataset name '{new_name}' already exists.")
+        # Basic validation for name (allow more chars now, sanitize for code exec)
+        # if not re.match(r"^[a-zA-Z0-9_\-\.]+$", new_name): raise ValueError("New name contains invalid characters.")
+        if old_dataset_name not in datasets_state: raise HTTPException(status_code=404, detail=f"Dataset '{old_dataset_name}' not found.")
+        if new_name == old_dataset_name: return {"message": f"Dataset name '{old_dataset_name}' unchanged.", "datasets": sorted(list(datasets_state.keys()))}
+        if new_name in datasets_state: raise HTTPException(status_code=409, detail=f"Dataset name '{new_name}' already exists.")
 
-        # Perform rename in primary registry
-        datasets[new_name] = datasets.pop(old_dataset_name)
-        # Perform rename in transformations state if exists
-        if old_dataset_name in transformations:
-            transformations[new_name] = transformations.pop(old_dataset_name)
-            # TODO: Update code chains within the renamed transformation history/state?
-            # This is complex. For now, the code might still reference the old name.
-            print(f"Warning: Code chains within renamed dataset '{new_name}' might still reference '{old_dataset_name}'.")
+        # Perform rename in the main state dictionary
+        datasets_state[new_name] = datasets_state.pop(old_dataset_name)
+        # Note: Code referencing the old name (e.g., in saved snippets) won't be updated automatically.
 
         print(f"Renamed dataset '{old_dataset_name}' to '{new_name}'")
         return {
             "message": f"Successfully renamed dataset '{old_dataset_name}' to '{new_name}'.",
             "old_name": old_dataset_name, "new_name": new_name,
-            "datasets": sorted(list(datasets.keys())) # Return updated list
+            "datasets": sorted(list(datasets_state.keys())) # Return updated list
         }
     except ValueError as ve: raise HTTPException(status_code=400, detail=str(ve))
     except HTTPException as http_err: raise http_err
     except Exception as e:
         print(f"Error renaming dataset '{old_dataset_name}': {type(e).__name__}: {e}")
         traceback.print_exc()
-        # Attempt to revert rename if partial failure? Complex. Better to signal error.
         raise HTTPException(status_code=500, detail=f"An internal error occurred during rename.")
 
 @app.delete("/dataset/{dataset_name}")
 async def delete_dataset(dataset_name: str):
-    """Deletes a dataset from the base registry and transformations."""
+    """Deletes a dataset from the main state."""
     try:
-        if dataset_name not in datasets:
+        if dataset_name not in datasets_state:
             raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' not found.")
 
-        # Delete from primary registry
-        del datasets[dataset_name]
-        # Delete from transformations state if exists
-        if dataset_name in transformations:
-            del transformations[dataset_name]
+        # Delete from the main state dictionary
+        del datasets_state[dataset_name]
 
         print(f"Deleted dataset '{dataset_name}'")
         return {
             "message": f"Successfully deleted dataset '{dataset_name}'.",
             "deleted_name": dataset_name,
-            "datasets": sorted(list(datasets.keys())) # Return updated list
+            "datasets": sorted(list(datasets_state.keys())) # Return updated list
         }
     except HTTPException as http_err: raise http_err
     except Exception as e:
@@ -1493,5 +1692,4 @@ async def delete_dataset(dataset_name: str):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"An internal error occurred during deletion.")
 
-# --- Optional: Add endpoint to clean up old temp DB files ---
-# This would require tracking creation times or using a more robust temp file solution.
+# --- END OF FILE main.py ---

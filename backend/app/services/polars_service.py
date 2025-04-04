@@ -4,6 +4,7 @@ import polars.selectors as cs # Import selectors for convenience
 import io
 import numpy as np
 import re # Import re for regex
+import traceback
 from typing import Dict, Any, Tuple, List, Optional
 
 # --- Helper ---
@@ -13,62 +14,50 @@ def _is_numeric_dtype_pl(df: pl.DataFrame, col_name: str) -> bool:
         return False
     return pl.datatypes.is_numeric(df[col_name].dtype)
 
+
 def apply_polars_operation(df: pl.DataFrame, operation: str, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
     """
     Applies a specified polars operation to the DataFrame.
     """
     try:
         # --- Existing Operations ---
-        if operation == "filter":
-            return _filter_rows_pl(df, params)
-        elif operation == "select_columns":
-            return _select_columns_pl(df, params)
-        elif operation == "sort":
-            return _sort_values_pl(df, params)
-        elif operation == "rename":
-            return _rename_columns_pl(df, params)
-        elif operation == "drop_columns":
-            return _drop_columns_pl(df, params)
-        elif operation == "groupby":
-             return _group_by_pl(df, params)
-        elif operation == "groupby_multi":
-             return _group_by_multi_pl(df, params)
-        elif operation == "groupby_multi_agg":
-             return _group_by_multi_agg_pl(df, params)
-        elif operation == "pivot":
-             return _pivot_pl(df, params)
-        elif operation == "melt":
-             return _melt_pl(df, params)
-        elif operation == "set_index": # Simulated
-            return _set_index_pl(df, params)
-        elif operation == "reset_index": # Simulated
-             return _reset_index_pl(df, params)
-
-        # --- NEW Operations ---
-        elif operation == "fillna":
-            return _fillna_pl(df, params)
-        elif operation == "dropna":
-            return _dropna_pl(df, params)
-        elif operation == "astype":
-            return _astype_pl(df, params)
-        elif operation == "string_operation":
-            return _string_op_pl(df, params)
-        elif operation == "date_extract":
-            return _date_extract_pl(df, params)
-        elif operation == "drop_duplicates":
-            return _drop_duplicates_pl(df, params)
-        elif operation == "create_column":
-            return _create_column_pl(df, params)
-        elif operation == "window_function":
-            return _window_function_pl(df, params)
-        elif operation == "sample":
-            return _sample_pl(df, params)
-        # Regex ops handled by apply_polars_regex, called from main.py's /regex-operation
+        if operation == "filter": return _filter_rows_pl(df, params)
+        elif operation == "select_columns": return _select_columns_pl(df, params)
+        elif operation == "sort": return _sort_values_pl(df, params)
+        elif operation == "rename": return _rename_columns_pl(df, params)
+        elif operation == "drop_columns": return _drop_columns_pl(df, params)
+        elif operation == "groupby": return _group_by_pl(df, params)
+        elif operation == "groupby_multi": return _group_by_multi_pl(df, params)
+        elif operation == "groupby_multi_agg": return _group_by_multi_agg_pl(df, params)
+        elif operation == "pivot": return _pivot_pl(df, params)
+        elif operation == "melt": return _melt_pl(df, params)
+        elif operation == "set_index": return _set_index_pl(df, params) # Simulated
+        elif operation == "reset_index": return _reset_index_pl(df, params) # Simulated
+        elif operation == "fillna": return _fillna_pl(df, params)
+        elif operation == "dropna": return _dropna_pl(df, params)
+        elif operation == "astype": return _astype_pl(df, params)
+        elif operation == "string_operation": return _string_op_pl(df, params)
+        elif operation == "date_extract": return _date_extract_pl(df, params)
+        elif operation == "drop_duplicates": return _drop_duplicates_pl(df, params)
+        elif operation == "create_column": return _create_column_pl(df, params) # Uses eval! Risky.
+        elif operation == "window_function": return _window_function_pl(df, params)
+        elif operation == "sample": return _sample_pl(df, params)
+        # --- NEW OPERATION ---
+        elif operation == "shuffle": return _shuffle_pl(df, params)
+        # Regex ops handled by apply_polars_regex
+        elif operation.startswith("regex_"): # e.g., regex_filter, regex_extract, regex_replace
+             return apply_polars_regex(df, operation.split('_', 1)[1], params)
+        elif operation == "_apply_lambda": return _apply_lambda_pl(df, params)
+        elif operation == "string_operation": return _string_op_pl(df, params)
+        elif operation == "date_extract": return _date_extract_pl(df, params)
+        elif operation == "create_column": return _create_column_pl(df, params) # Uses eval! Risky.
+        elif operation == "window_function": return _window_function_pl(df, params)
 
         else:
             raise ValueError(f"Unsupported polars operation: {operation}")
     except Exception as e:
         print(f"Error executing polars operation '{operation}': {type(e).__name__}: {e}")
+        traceback.print_exc() # Print traceback
         raise e
 
 # --- Specific Operations ---
@@ -809,13 +798,14 @@ def _window_function_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.Da
 def _sample_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
     n = params.get("n")
     frac = params.get("frac")
-    replace = params.get("replace", False)
-    shuffle = params.get("shuffle", False) # Polars sample has shuffle option
-    seed = params.get("seed")
+    replace = params.get("replace", False) # Named 'replace' from UI
+    shuffle = params.get("shuffle", True) # Default shuffle=True makes sense for sampling
+    seed = params.get("seed") # Named 'seed' from UI
 
     if n is None and frac is None: raise ValueError("Sample requires 'n' or 'frac'.")
     if n is not None and frac is not None: raise ValueError("Provide 'n' or 'frac', not both.")
 
+    # Map UI names to Polars names
     sample_args = {"with_replacement": replace, "shuffle": shuffle}
     if n is not None: sample_args["n"] = int(n)
     if frac is not None: sample_args["fraction"] = float(frac)
@@ -825,14 +815,41 @@ def _sample_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, 
     # Polars uses n/fraction keyword args positionally first if not None
     if n is not None: code_args_list.append(f"n={n}")
     elif frac is not None: code_args_list.append(f"fraction={frac}")
-    code_args_list.extend([f"{k}={repr(v)}" for k, v in sample_args.items() if k not in ["n", "fraction"]])
+
+    # Add other args explicitly by keyword name
+    # Use the polars kwarg names in the code string
+    polars_kwargs = {
+        "with_replacement": replace,
+        "shuffle": shuffle,
+        "seed": seed
+    }
+    code_args_list.extend([f"{k}={repr(v)}" for k, v in polars_kwargs.items() if v is not None and k != 'seed'] + ([f"seed={seed}"] if seed is not None else [])) # handle seed separately for clarity
 
     code_args = ', '.join(code_args_list)
-    code = f"# Sample rows\ndf = df.sample({code_args})"
+    code = f"# Sample rows (Polars)\ndf = df.sample({code_args})"
     try:
         result_df = df.sample(**sample_args)
     except Exception as e: # Catch errors like negative n etc.
          raise ValueError(f"Error during polars sampling: {e}")
+
+    return result_df, code
+
+# --- NEW SHUFFLE IMPLEMENTATION ---
+def _shuffle_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    """Shuffles all rows of the DataFrame using Polars."""
+    seed = params.get("seed") # Optional seed
+
+    sample_args = {"fraction": 1.0, "shuffle": True}
+    if seed is not None:
+        sample_args["seed"] = int(seed)
+        code = f"# Shuffle all rows with seed {seed} (Polars)\ndf = df.sample(fraction=1.0, shuffle=True, seed={seed})"
+    else:
+        code = f"# Shuffle all rows randomly (Polars)\ndf = df.sample(fraction=1.0, shuffle=True)"
+
+    try:
+        result_df = df.sample(**sample_args)
+    except Exception as e:
+        raise ValueError(f"Error during polars shuffling: {e}")
 
     return result_df, code
 
@@ -885,6 +902,48 @@ def apply_polars_regex(df: pl.DataFrame, operation: str, params: Dict[str, Any])
         raise ValueError(f"Polars compute error during regex '{operation}': {comp_err}")
     except Exception as e:
          raise ValueError(f"Error during polars regex '{operation}': {e}")
+
+    return result_df, code
+
+def _apply_lambda_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    """Applies a lambda function defined as a string to a column."""
+    column = params.get("column")
+    lambda_str = params.get("lambda_str")
+    new_column_name = params.get("new_column_name") # Optional
+
+    if not column or not lambda_str:
+        raise ValueError("apply_lambda requires 'column' and 'lambda_str' parameters.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found for apply_lambda.")
+
+    # Basic validation of lambda string (very limited)
+    if not lambda_str.strip().startswith("lambda"):
+        raise ValueError("lambda_str must start with 'lambda'.")
+
+    result_df = df.copy()
+    target_column = new_column_name if new_column_name else column
+    code = f"# Apply lambda function to column '{column}'\n"
+    # Ensure necessary imports might be available in the lambda context (pd, np)
+    code += f"# Make sure 'pl' and 'np' are available if used in the lambda\n"
+    code += f"lambda_func = {lambda_str}\n" # Show the lambda definition
+    code += f"df['{target_column}'] = df['{column}'].apply(lambda_func)"
+
+    try:
+        # --- SECURITY WARNING: Using eval is risky! ---
+        # Create the actual lambda function from the string
+        # Provide pandas and numpy in the eval context for convenience
+        lambda_func = eval(lambda_str, {"pl": pl, "np": np})
+
+        # Apply the lambda function
+        result_df[target_column] = result_df[column].apply(lambda_func)
+
+    except SyntaxError as se:
+        raise ValueError(f"Invalid lambda function syntax: {se}") from se
+    except Exception as e:
+        # Catch errors during lambda execution (e.g., TypeError on incompatible data)
+        print(f"Error executing lambda on column '{column}': {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise ValueError(f"Error applying lambda to column '{column}': {e}. Check function logic and column data type.") from e
 
     return result_df, code
 
@@ -998,3 +1057,233 @@ def replay_polars_operations(original_content: bytes, history: List[Dict[str, An
 
     cumulative_code = "\n".join(cumulative_code_lines)
     return final_content, cumulative_code
+
+def _string_op_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    column = params.get("column")
+    string_func = params.get("string_function") # 'upper', 'lower', 'strip', 'split', 'length'
+    new_col_name = params.get("new_column_name", f"{column}_{string_func}")
+    delimiter = params.get("delimiter")
+    part_index = params.get("part_index") # 0-based for polars list slicing
+
+    if not column or not string_func:
+        raise ValueError("string_operation requires 'column' and 'string_function'.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found.")
+
+    code = f"# Apply string operation '{string_func}' to column '{column}'\n"
+    # Ensure Utf8 and access str namespace. Cast needed for safety.
+    target_col_expr_str = f"pl.col('{column}').cast(pl.Utf8).str"
+    result_expr_str = ""
+    pl_expr = None
+
+    func_lower = string_func.lower()
+    try:
+        if func_lower == 'upper':
+            result_expr_str = f"{target_col_expr_str}.to_uppercase()"
+            pl_expr = pl.col(column).cast(pl.Utf8).str.to_uppercase()
+        elif func_lower == 'lower':
+            result_expr_str = f"{target_col_expr_str}.to_lowercase()"
+            pl_expr = pl.col(column).cast(pl.Utf8).str.to_lowercase()
+        elif func_lower == 'strip':
+            result_expr_str = f"{target_col_expr_str}.strip_chars()" # Strips whitespace
+            pl_expr = pl.col(column).cast(pl.Utf8).str.strip_chars()
+        elif func_lower == 'length':
+            result_expr_str = f"{target_col_expr_str}.len_bytes()" # Or len_chars() ? len_bytes is usually faster
+            pl_expr = pl.col(column).cast(pl.Utf8).str.len_bytes() # Use len_bytes
+        elif func_lower == 'split':
+            if delimiter is None or part_index is None:
+                raise ValueError("String split requires 'delimiter' and 'part_index' (0-based).")
+            # .str.split() returns list, .list.get() accesses element
+            result_expr_str = f"{target_col_expr_str}.split({repr(delimiter)}).list.get({int(part_index)})"
+            pl_expr = pl.col(column).cast(pl.Utf8).str.split(delimiter).list.get(int(part_index))
+        else:
+            raise ValueError(f"Unsupported string_function for polars: {string_func}")
+
+        code += f"df = df.with_columns({result_expr_str}.alias('{new_col_name}'))"
+        result_df = df.with_columns(pl_expr.alias(new_col_name))
+
+    except Exception as e: # Catch errors like index out of bounds for split
+        raise ValueError(f"Error applying polars string function '{string_func}': {e}")
+
+    return result_df, code
+
+def _date_extract_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    column = params.get("column")
+    part = params.get("part") # year, month, day, hour, minute, second, ordinal_day, weekday, week, quarter
+    new_col_name = params.get("new_column_name", f"{column}_{part}")
+
+    if not column or not part:
+        raise ValueError("date_extract requires 'column' and 'part'.")
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found.")
+
+    # Map UI part names to polars dt methods/attributes
+    part_map = {
+        'year': 'year()', 'month': 'month()', 'day': 'day()',
+        'hour': 'hour()', 'minute': 'minute()', 'second': 'second()',
+        'millisecond': 'millisecond()', 'microsecond': 'microsecond()', 'nanosecond': 'nanosecond()',
+        'weekday': 'weekday()', # Monday=1, Sunday=7
+        'week': 'week()', # ISO week number
+        'ordinal_day': 'ordinal_day()', # Day of year
+        'quarter': 'quarter()',
+        'iso_year': 'iso_year()', # ISO 8601 year
+        # Add more as needed: 'timestamp', 'epoch', 'days', 'seconds', etc.
+    }
+    part_lower = part.lower()
+    if part_lower not in part_map:
+        raise ValueError(f"Invalid date part '{part}' for polars. Valid examples: {list(part_map.keys())}")
+
+    pl_method_call = part_map[part_lower]
+
+    code = f"# Extract '{part}' from date/time column '{column}'\n"
+    # Access the .dt namespace and call the appropriate method
+    target_expr_str = f"pl.col('{column}').dt.{pl_method_call}"
+    code += f"df = df.with_columns({target_expr_str}.alias('{new_col_name}'))"
+
+    try:
+        # Ensure column is appropriate type before accessing .dt
+        # Polars raises explicit error if type is wrong (e.g., accessing .dt on Int)
+        # Extract the method name (e.g., 'year') from the call string ('year()')
+        method_name = pl_method_call.replace('()', '')
+        pl_expr = getattr(pl.col(column).dt, method_name)() # Dynamically call the method
+
+        result_df = df.with_columns(pl_expr.alias(new_col_name))
+    except AttributeError:
+         # More specific error if .dt namespace isn't available
+         raise ValueError(f"Failed to extract date part '{part}'. Column '{column}' is not a Date or Datetime type.")
+    except Exception as e:
+         raise ValueError(f"Failed to extract date part '{part}' from column '{column}'. Error: {e}")
+
+    return result_df, code
+
+def _create_column_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    new_col_name = params.get("new_column_name")
+    expression_str = params.get("expression") # Polars expression as a string
+
+    if not new_col_name or not expression_str:
+        raise ValueError("create_column requires 'new_column_name' and 'expression' string.")
+
+    code = f"# Create new column '{new_col_name}' using Polars expression\n"
+    code += f"import polars as pl\n" # Ensure pl is available in snippet context
+    # The expression string MUST be a valid Polars expression string
+    # e.g., "pl.col('a') + pl.col('b')", "pl.lit(5)", "pl.when(pl.col('x') > 0).then(pl.lit('pos')).otherwise(pl.lit('neg'))"
+    code += f"df = df.with_columns( ({expression_str}).alias('{new_col_name}') )"
+
+    # !!! SECURITY WARNING: EVALUATING ARBITRARY STRING EXPRESSIONS IS RISKY !!!
+    # This uses eval(), which can execute arbitrary code if not carefully controlled.
+    # Use only in trusted environments or replace with a safer evaluation method.
+    print(f"⚠️ SECURITY WARNING: Executing create_column_pl with eval() on expression: {expression_str}")
+    local_env = {'pl': pl, 'cs': cs} # Provide polars and selectors in the eval context
+    try:
+        # Evaluate the expression string to get a Polars expression object
+        polars_expr = eval(expression_str, {"__builtins__": {}}, local_env) # Restricted builtins
+
+        # Check if the result is a valid Polars expression or literal
+        if not isinstance(polars_expr, pl.Expr):
+            # Allow literals directly? Wrap them in pl.lit() for safety
+            if isinstance(polars_expr, (str, int, float, bool, list, tuple)): # Allow basic literals and sequences
+                polars_expr = pl.lit(polars_expr)
+            else:
+                raise ValueError(f"Expression '{expression_str}' did not evaluate to a valid Polars expression or literal. Got type: {type(polars_expr)}")
+
+        # Apply the expression using with_columns
+        result_df = df.with_columns(polars_expr.alias(new_col_name))
+    except SyntaxError as se:
+        raise ValueError(f"Invalid syntax in expression: {expression_str}. Error: {se}")
+    except Exception as e:
+        # Catch errors during evaluation or application (e.g., column not found in expression)
+        raise ValueError(f"Failed to evaluate or apply expression '{expression_str}': {e}")
+
+    return result_df, code
+
+def _window_function_pl(df: pl.DataFrame, params: Dict[str, Any]) -> Tuple[pl.DataFrame, str]:
+    func = params.get("window_function") # e.g., 'rank', 'lead', 'lag', 'sum', 'avg', 'row_number'
+    target_column = params.get("target_column") # Column to apply func on (e.g., for sum, lead, lag)
+    order_by_columns = params.get("order_by_columns") # List of dicts: [{'column': 'c', 'descending': False}]
+    partition_by_columns = params.get("partition_by_columns") # Optional list of column names
+    new_col_name = params.get("new_column_name", f"{func}_window")
+    # Function-specific params
+    rank_method = params.get("rank_method", "average") # For rank: 'average', 'min', 'max', 'dense', 'ordinal'
+    offset = params.get("offset", 1) # For lead/lag
+    default_value = params.get("default_value") # Optional fill for lead/lag
+
+    # --- Validation ---
+    if not func: raise ValueError("Window function requires 'window_function' name.")
+    # Some functions don't need target_column (rank, row_number)
+    agg_funcs = ['sum', 'mean', 'avg', 'min', 'max', 'median', 'std', 'var', 'count', 'first', 'last']
+    lead_lag = ['lead', 'lag']
+    rank_funcs = ['rank', 'dense_rank', 'row_number'] # Polars uses rank(method=...)
+
+    if func.lower() in agg_funcs + lead_lag and not target_column:
+        raise ValueError(f"Window function '{func}' requires a 'target_column'.")
+    # Order by is generally recommended for meaningful window results, but not strictly required by Polars syntax
+    # if not order_by_columns: raise ValueError("Window function requires 'order_by_columns'.")
+
+    cols_to_check = []
+    if target_column: cols_to_check.append(target_column)
+    if order_by_columns: cols_to_check.extend([spec['column'] for spec in order_by_columns])
+    if partition_by_columns: cols_to_check.extend(partition_by_columns)
+    missing = [col for col in cols_to_check if col not in df.columns]
+    if missing: raise ValueError(f"Columns not found for window function: {', '.join(missing)}")
+
+    # --- Build Expression ---
+    code = f"# Apply window function '{func}'\n"
+    pl_expr = None
+    window_expr_str = ""
+
+    try:
+        # Base expression (the function itself)
+        if func.lower() in rank_funcs:
+            # Map UI rank names to Polars rank methods if needed
+            polars_rank_method = rank_method
+            if func.lower() == 'dense_rank': polars_rank_method = 'dense'
+            elif func.lower() == 'row_number': polars_rank_method = 'ordinal'
+            # Rank needs a column to rank *by*, usually the order_by column
+            if not order_by_columns: raise ValueError("Rank functions require 'order_by_columns'.")
+            rank_col = order_by_columns[0]['column'] # Rank by the first order_by column
+            is_desc = order_by_columns[0].get('descending', False)
+            window_expr_str = f"pl.col('{rank_col}').rank(method='{polars_rank_method}', descending={is_desc})"
+            pl_expr = pl.col(rank_col).rank(method=polars_rank_method, descending=is_desc)
+        elif func.lower() in lead_lag:
+            fill_null_expr_str = f".fill_null({repr(default_value)})" if default_value is not None else ""
+            window_expr_str = f"pl.col('{target_column}').{func.lower()}(n={int(offset)}){fill_null_expr_str}"
+            pl_expr = getattr(pl.col(target_column), func.lower())(n=int(offset))
+            if default_value is not None:
+                pl_expr = pl_expr.fill_null(default_value)
+        elif func.lower() in agg_funcs:
+            # Map common names
+            polars_agg_func = func.lower()
+            if polars_agg_func == 'avg': polars_agg_func = 'mean'
+            # Apply aggregate function over the window
+            window_expr_str = f"pl.col('{target_column}').{polars_agg_func}()"
+            pl_expr = getattr(pl.col(target_column), polars_agg_func)()
+        else:
+            raise ValueError(f"Unsupported window_function for polars: {func}.")
+
+        # Add OVER clause (partitioning)
+        if partition_by_columns:
+            window_expr_str += f".over({repr(partition_by_columns)})"
+            pl_expr = pl_expr.over(partition_by_columns)
+        # Note: Polars applies window functions *after* grouping/partitioning.
+        # Sorting is handled implicitly by some functions (like rank) or needs to be done *before* if needed globally (e.g., global lead/lag).
+        # For partitioned windows, Polars calculates within each partition.
+
+        # --- Sorting (Important!) ---
+        # If order_by is specified, sort *before* applying the window function for consistent results, especially for rank/lead/lag.
+        # If partitioning, sort within partitions? Polars handles this via `over`.
+        # If global (no partition), sort the whole dataframe.
+        if order_by_columns:
+             sort_cols = [spec['column'] for spec in order_by_columns]
+             sort_desc = [spec.get('descending', False) for spec in order_by_columns]
+             code += f"# Ensure data is sorted for predictable window results\n"
+             code += f"df = df.sort(by={repr(sort_cols)}, descending={repr(sort_desc)})\n"
+             df = df.sort(by=sort_cols, descending=sort_desc) # Apply sort before with_columns
+
+        # Final code snippet and execution
+        code += f"df = df.with_columns({window_expr_str}.alias('{new_col_name}'))"
+        result_df = df.with_columns(pl_expr.alias(new_col_name))
+
+    except Exception as e:
+        raise ValueError(f"Error applying polars window function '{func}': {e}")
+
+    return result_df, code

@@ -1,231 +1,267 @@
 // src/App.jsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'; // Import Router components
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import apiService from './services/api';
 
 import NavBar from './components/NavBar';
 import EnhancedDataTable from './components/DataTable';
-import EnhancedOperationsPanel from './components/OperationsPanel';
+import EnhancedOperationsPanel from './components/OperationsPanel'; // <-- Import Operations Panel
 import CodeDisplay from './components/CodeDisplay';
 import CodeEditor from './components/CodeEditor';
 import TextUploadModal from './components/TextUploadModal';
 import DatasetInfoPanel from './components/DatasetInfoPanel';
 import ColumnStatsPanel from './components/ColumnStatsPanel';
 import RelationalAlgebraPanel from './components/RelationalAlgebraPanel';
-import DatasetManagerPage from './components/DatasetManagerPage'; // Import the new page
+import DatasetManagerPage from './components/DatasetManagerPage';
 
 function App() {
-  // Core State (remain the same)
-  const [currentDataset, setCurrentDataset] = useState(null);
+  // --- Core State ---
   const [availableDatasets, setAvailableDatasets] = useState([]);
-  const [engine, setEngine] = useState('pandas');
-  const [columns, setColumns] = useState([]);
-  const [data, setData] = useState([]);
-  const [rowCount, setRowCount] = useState(0);
+  const [currentViewName, setCurrentViewName] = useState(null);
+  const [engine, setEngine] = useState('pandas'); // Default engine
+
+  // State for the *currently viewed* dataset's data
+  const [viewData, setViewData] = useState([]);
+  const [viewColumns, setViewColumns] = useState([]);
+  const [viewRowCount, setViewRowCount] = useState(0);
+  const [viewCanUndo, setViewCanUndo] = useState(false);
+  const [viewCanReset, setViewCanReset] = useState(false);
+
+  // General App State
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [lastExecutedCode, setLastExecutedCode] = useState(''); // Store last executed code OR code from operation panel
 
-  // Transformation State (remain the same)
-  const [canUndo, setCanUndo] = useState(false);
-  const [canReset, setCanReset] = useState(false);
-  const [lastCode, setLastCode] = useState('');
-  const [currentEditorCode, setCurrentEditorCode] = useState('');
-
-  // DB Upload State (remain the same)
+  // DB Upload State
   const [tempDbId, setTempDbId] = useState(null);
   const [dbTables, setDbTables] = useState([]);
   const [showDbModal, setShowDbModal] = useState(false);
 
-  // Text Upload Modal State (remain the same)
+  // Text Upload Modal State
   const [showTextModal, setShowTextModal] = useState(false);
 
-  // Dataset Info Panel State (remain the same)
+  // Dataset Info Panel State
   const [datasetInfo, setDatasetInfo] = useState(null);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
 
-  // Column Stats Panel State (remain the same)
+  // Column Stats Panel State
   const [columnStats, setColumnStats] = useState(null);
   const [selectedColumnForStats, setSelectedColumnForStats] = useState(null);
   const [showColumnStatsPanel, setShowColumnStatsPanel] = useState(false);
 
-  // Relational Algebra Panel State (remain the same)
+  // Relational Algebra Panel State
   const [showRaPanel, setShowRaPanel] = useState(false);
 
-  // --- Utility Functions (remain the same) ---
+  // --- Utility Functions ---
   const clearError = () => setError(null);
   const handleError = (err, defaultMessage = 'An error occurred') => {
      console.error("Error caught in handler:", err);
      let message = defaultMessage;
      if (typeof err === 'string') { message = err; }
      else if (err?.response?.data?.detail) {
-        // Handle FastAPI validation errors, strings, or other formats
         const detail = err.response.data.detail;
          if (typeof detail === 'string') message = detail;
          else if (Array.isArray(detail)) message = detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ');
          else message = JSON.stringify(detail);
      } else if (err?.message) { message = err.message; }
      setError(message);
-     setIsLoading(false); // Ensure loading is stopped on error
+     setIsLoading(false);
   };
 
-  // --- Data Fetching and State Update (remain the same) ---
+  // --- Data Fetching and State Update ---
   const fetchDatasetsList = useCallback(async () => {
-         // No setIsLoading here, can run in background
-         clearError(); // Clear previous errors before fetching
+         clearError();
          try {
              const datasets = await apiService.getDatasets();
              setAvailableDatasets(datasets || []);
+             if (currentViewName && !datasets.includes(currentViewName)) {
+                 console.log(`Current view '${currentViewName}' no longer available. Resetting view.`);
+                 setCurrentViewName(null);
+             }
          } catch (err) {
               console.error('Failed to fetch dataset list:', err);
-             // Avoid setting a global error for background fetch failure
-             // setError("Failed to fetch dataset list. Some operations might be affected.");
          }
-    }, []);
+    }, [currentViewName]);
 
-    const updateStateFromResult = (result, origin = "load") => {
-      if (!result) return;
-      setData(result.data || []);
-      setColumns(result.columns || []);
-      setRowCount(result.row_count || 0);
-      setCanUndo(result.can_undo || false);
-      setCanReset(result.can_reset || false);
-      setLastCode(result.last_code || result.code || ''); // Update last code display
+    // Updates the VIEW state based on API result for a specific dataset
+    const updateViewState = (result, datasetName) => {
+      // Ensure result is valid and matches the intended dataset
+      if (!result || !datasetName || datasetName !== currentViewName) {
+          console.warn("updateViewState called with invalid result or mismatched dataset name.", { result, datasetName, currentViewName });
+          return;
+      }
 
-      // Update editor only on specific actions to avoid overwriting user input
-      if (['load', 'undo', 'reset', 'code_exec', 'upload', 'db_import', 'text_upload', 'save_ra'].includes(origin)) {
-           setCurrentEditorCode(result.last_code || result.code || '');
+      console.log(`Updating view state for: ${datasetName}`);
+      setViewData(result.data || []);
+      setViewColumns(result.columns || []);
+      setViewRowCount(result.row_count || 0);
+      setViewCanUndo(result.can_undo || false);
+      setViewCanReset(result.can_reset || false);
+
+      // Optionally display generated code from operation panel
+      if (result.generated_code) {
+          setLastExecutedCode(result.generated_code);
       }
-      // Reset info/stats panels when data changes significantly
-      if (['load', 'reset', 'upload', 'db_import', 'text_upload', 'save_ra', 'rename', 'delete'].includes(origin)) {
-          setShowInfoPanel(false); setDatasetInfo(null);
-          setShowColumnStatsPanel(false); setColumnStats(null); setSelectedColumnForStats(null);
-      }
+
+      // Reset info/stats panels when view data changes significantly
+      setShowInfoPanel(false); setDatasetInfo(null);
+      setShowColumnStatsPanel(false); setColumnStats(null); setSelectedColumnForStats(null);
   };
 
- const loadDataset = useCallback(async (datasetName, targetEngine = engine) => {
-     // ... (keep existing implementation, uses updateStateFromResult) ...
-      if (!datasetName) {
-        setCurrentDataset(null);
-        setData([]); setColumns([]); setRowCount(0);
-        setCanUndo(false); setCanReset(false); setLastCode(''); setCurrentEditorCode('');
+ // Loads data for the `currentViewName`
+ const loadViewData = useCallback(async (viewName) => {
+      if (!viewName) {
+        setViewData([]); setViewColumns([]); setViewRowCount(0);
+        setViewCanUndo(false); setViewCanReset(false);
         setDatasetInfo(null); setShowInfoPanel(false);
         setColumnStats(null); setShowColumnStatsPanel(false); setSelectedColumnForStats(null);
         clearError();
         return;
       }
-      setIsLoading(true);
-      clearError();
-      setShowInfoPanel(false); setShowColumnStatsPanel(false); // Close panels
+      if (!availableDatasets.includes(viewName)) {
+          console.warn(`Attempted to load view for unavailable dataset: ${viewName}. Clearing view.`);
+          setCurrentViewName(null);
+          return;
+      }
+      console.log(`Loading view data for: ${viewName}`);
+      setIsLoading(true); clearError();
+      setShowInfoPanel(false); setShowColumnStatsPanel(false);
 
       try {
-        const result = await apiService.getDataset(datasetName, targetEngine);
+        const result = await apiService.getDatasetView(viewName);
         if (result) {
-           updateStateFromResult(result, "load");
-           setCurrentDataset(datasetName);
+           updateViewState(result, viewName);
         } else {
-            throw new Error(`Received no result when loading dataset '${datasetName}'.`);
+            throw new Error(`Received no result when loading view for dataset '${viewName}'.`);
         }
       } catch (err) {
-        handleError(err, `Failed to load dataset '${datasetName}'.`);
-        setCurrentDataset(null); // Reset selection on severe load failure
-        // Fetch list again in case the dataset was deleted/unavailable
-        fetchDatasetsList();
+        handleError(err, `Failed to load view for dataset '${viewName}'.`);
+        setViewData([]); setViewColumns([]); setViewRowCount(0);
+        setViewCanUndo(false); setViewCanReset(false);
       } finally {
         setIsLoading(false);
       }
-  }, [engine, fetchDatasetsList]); // Added fetchDatasetsList dependency
+  }, [availableDatasets]); // Dependency added
 
+  // Initial load and fetch list
   useEffect(() => {
     fetchDatasetsList();
     apiService.testConnection().then(r => console.log(r.message)).catch(e => setError("Backend connection failed. Check if the server is running."));
  }, [fetchDatasetsList]);
 
-// --- Re-load data when currentDataset or engine changes (keep existing) ---
+ // Reload view data when the selected view name changes
  useEffect(() => {
-     if (currentDataset && availableDatasets.includes(currentDataset)) {
-         loadDataset(currentDataset, engine);
-     } else if (currentDataset && !availableDatasets.includes(currentDataset)) {
-          console.log(`Current dataset ${currentDataset} no longer available (maybe deleted/renamed). Resetting selection.`);
-          setCurrentDataset(null); // Triggers clearing logic in loadDataset
-     } else if (!currentDataset) {
-         // Explicitly clear if currentDataset becomes null
-         loadDataset(null);
-     }
+     console.log(`Effect: currentViewName changed to '${currentViewName}'. Loading data.`);
+     loadViewData(currentViewName);
      // eslint-disable-next-line react-hooks/exhaustive-deps
- }, [currentDataset, availableDatasets, engine]); // loadDataset is stable due to useCallback
+ }, [currentViewName]);
+
 
   // --- Handlers for UI Actions ---
 
-  // handleDatasetUploaded, handleEngineChange, handleDatasetChange, handleOperationSubmit,
-  // handleExecuteCode, handleUndo, handleReset, handleSaveTransform, handleExport,
-  // DB Upload Handlers, Text Upload Handlers, Info/Stats Panel Handlers, RA Handlers
-  // ... (keep existing implementations) ...
-
-  const handleDatasetUploaded = (uploadResult, source = "upload") => {
-    if (uploadResult && uploadResult.dataset_name) {
-        fetchDatasetsList().then(() => { // Fetch list *then* update state
-            updateStateFromResult({
-                ...uploadResult,
-                data: uploadResult.preview || [],
-                can_undo: false,
-                can_reset: false,
-                last_code: '',
-            }, source);
-            setCurrentDataset(uploadResult.dataset_name); // Switch to the new dataset
-            clearError();
-            setShowTextModal(false);
-            setShowDbModal(false);
-        });
+  // Handles results from Upload, DB Import, RA Save
+  const handleDatasetCreation = (result, source = "upload") => {
+    if (result && result.dataset_name && result.datasets) {
+        setAvailableDatasets(result.datasets);
+        setCurrentViewName(result.dataset_name);
+        setViewData(result.preview || []);
+        setViewColumns(result.columns || []);
+        setViewRowCount(result.row_count || 0);
+        setViewCanUndo(false);
+        setViewCanReset(false);
+        setLastExecutedCode('');
+        clearError();
+        setShowTextModal(false);
+        setShowDbModal(false);
+        setShowRaPanel(false);
     } else {
-        handleError(null, "Upload process did not return expected dataset information.");
+        handleError(null, `${source} process did not return expected dataset information.`);
     }
  };
+
   const handleEngineChange = (newEngine) => {
     setEngine(newEngine);
-    // The useEffect hook dependent on 'engine' will handle reloading the preview
   };
+
   const handleDatasetChange = (datasetName) => {
-    if (datasetName !== currentDataset) {
-      setCurrentDataset(datasetName); // Triggers useEffect to load
+    if (datasetName !== currentViewName) {
+      console.log(`Changing view from '${currentViewName}' to '${datasetName}'`);
+      setCurrentViewName(datasetName);
+      setLastExecutedCode('');
     }
   };
-   const handleOperationSubmit = async (operation, params) => {
-    if (!currentDataset) return handleError("Please select a dataset first.");
+
+  // --- Handler for Operations Panel ---
+  const handleOperationSubmit = async (operation, params) => {
+    console.log("App.jsx: handleOperationSubmit called with:", operation, params, "Engine:", engine); // Log engine
+    if (!currentViewName) {
+      handleError("Please select a dataset first.");
+      return;
+    }
     setIsLoading(true); clearError();
+
     try {
-      let result;
-      let apiFunction;
-      let operationDesc = operation;
+      // Use the NEW endpoint and pass the engine
+      const result = await apiService.applyStructuredOperation(
+          currentViewName,
+          operation,
+          params, // apiService will stringify
+          engine // Pass the current engine state
+      );
+      console.log("Operation result:", result);
 
-      if (operation === 'merge') {
-        if (!params.right_dataset || !params.left_on || !params.right_on) throw new Error("Merge requires Right Dataset, Left Key, and Right Key.");
-        apiFunction = () => apiService.mergeDatasets(currentDataset, params.right_dataset, params, engine);
-        operationDesc = `Merge with ${params.right_dataset}`;
-      } else if (operation === 'regex_operation') {
-        if (!params.regex_action || !params.column || !params.regex) throw new Error("Regex operation requires Action, Column, and Pattern.");
-        apiFunction = () => apiService.performRegexOperation(currentDataset, params.regex_action, params, engine);
-        operationDesc = `Regex ${params.regex_action}`;
-      } else {
-        apiFunction = () => apiService.performOperation(currentDataset, operation, params, engine);
-      }
+      // Update view state based on the result
+      updateViewState(result, currentViewName); // Update view with new state
+      // Update the list of datasets if it changed (e.g., merge creating new?) - unlikely for ops panel
+      // fetchDatasetsList(); // Maybe not needed here unless ops can create datasets
 
-      result = await apiFunction();
-      updateStateFromResult(result, "operation");
-      console.log(`${operationDesc} successful.`);
+      // Store generated code/snippet if needed for display
+      setLastExecutedCode(result.generated_code || '');
+
     } catch (err) {
-      handleError(err, `Failed to perform operation: ${operation}.`);
+      handleError(err, `Failed to apply operation '${operation}'.`);
     } finally {
       setIsLoading(false);
     }
   };
+
+
   const handleExecuteCode = async (codeToExecute) => {
-    if (!currentDataset || !codeToExecute.trim()) return handleError("Select a dataset and write code.");
+    console.log("App.jsx: handleExecuteCode called with code:", codeToExecute);
+    if (!codeToExecute.trim()) {
+        handleError("Write some code to execute.");
+        return;
+    }
     setIsLoading(true); clearError();
+    setLastExecutedCode(codeToExecute);
+
     try {
-      const result = await apiService.executeCustomCode(currentDataset, codeToExecute, engine);
-      updateStateFromResult(result, "code_exec");
-      setCurrentEditorCode(codeToExecute);
-      setLastCode(codeToExecute);
+      const result = await apiService.executeCustomCode(codeToExecute, engine, currentViewName);
+      console.log("Code execution result:", result);
+
+      if (result.datasets) {
+        setAvailableDatasets(result.datasets);
+      }
+
+      if (result.primary_result_name && result.primary_result_name === currentViewName) {
+          updateViewState({
+              data: result.preview,
+              columns: result.columns,
+              row_count: result.row_count,
+              can_undo: result.can_undo ?? viewCanUndo,
+              can_reset: result.can_reset ?? viewCanReset
+          }, currentViewName);
+      } else if (result.primary_result_name && result.primary_result_name !== currentViewName) {
+          setCurrentViewName(result.primary_result_name);
+          setViewData(result.preview || []);
+          setViewColumns(result.columns || []);
+          setViewRowCount(result.row_count || 0);
+          setViewCanUndo(result.can_undo ?? false);
+          setViewCanReset(result.can_reset ?? false);
+      } else if (currentViewName) {
+          loadViewData(currentViewName);
+      }
+
       console.log("Custom code execution successful.");
     } catch (err) {
       handleError(err, 'Failed to execute custom code.');
@@ -233,61 +269,48 @@ function App() {
       setIsLoading(false);
     }
   };
-  const handleUndo = async () => {
-    if (!currentDataset || !canUndo) return;
-    setIsLoading(true); clearError();
-    try {
-      const result = await apiService.undoTransformation(currentDataset, engine);
-      updateStateFromResult(result, "undo");
-      console.log("Undo successful.");
-    } catch (err) {
-      handleError(err, 'Failed to undo operation.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-  const handleReset = async () => {
-    if (!currentDataset || !canReset) return;
-    setIsLoading(true); clearError();
-    try {
-      const result = await apiService.resetTransformation(currentDataset, engine);
-      updateStateFromResult(result, "reset");
-      console.log("Reset successful.");
-    } catch (err) {
-      handleError(err, 'Failed to reset transformations.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-  const handleSaveTransform = async () => {
-    if (!currentDataset) return;
-    const newName = prompt(`Enter a name for the new dataset (saving current state of '${currentDataset}'):`);
-    if (!newName || !newName.trim()) return;
 
+  const handleUndo = async () => {
+    if (!currentViewName || !viewCanUndo) return;
     setIsLoading(true); clearError();
     try {
-      const result = await apiService.saveTransformation(currentDataset, newName.trim(), engine);
-      console.log(result.message);
-      fetchDatasetsList(); // Refresh list
-      alert(`Successfully saved as '${result.dataset_name}'. Select it from the dropdown.`);
+      const result = await apiService.undoTransformation(currentViewName);
+      updateViewState(result, currentViewName);
+      console.log("Undo successful for:", currentViewName);
     } catch (err) {
-      handleError(err, `Failed to save transformation as '${newName}'.`);
+      handleError(err, `Failed to undo operation for '${currentViewName}'.`);
     } finally {
       setIsLoading(false);
     }
   };
-  const handleExport = async (format) => {
-    if (!currentDataset) return handleError("Please select a dataset to export.");
+
+  const handleReset = async () => {
+    if (!currentViewName || !viewCanReset) return;
     setIsLoading(true); clearError();
     try {
-      await apiService.exportDataset(currentDataset, format, engine);
+      const result = await apiService.resetTransformation(currentViewName);
+      updateViewState(result, currentViewName);
+      console.log("Reset successful for:", currentViewName);
+    } catch (err) {
+      handleError(err, `Failed to reset transformations for '${currentViewName}'.`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleExport = async (format) => {
+    if (!currentViewName) return handleError("Please select a dataset to export.");
+    setIsLoading(true); clearError();
+    try {
+      await apiService.exportDataset(currentViewName, format);
     } catch (err) {
        console.error("Export trigger failed in App.jsx");
-       handleError(err, `Export failed.`);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // DB Upload Handlers
   const handleDbFileUpload = async (file) => {
     if (!file) return;
     setIsLoading(true); clearError(); setTempDbId(null); setDbTables([]);
@@ -309,13 +332,15 @@ function App() {
     setIsLoading(true); clearError();
     try {
       const result = await apiService.importDbTable(tempDbId, tableName, newDatasetName);
-      handleDatasetUploaded(result, "db_import");
+      handleDatasetCreation(result, "db_import");
     } catch (err) {
       handleError(err, `Failed to import table '${tableName}'.`);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // Text Upload Handlers
   const handleOpenTextModal = () => setShowTextModal(true);
   const handleCloseTextModal = () => setShowTextModal(false);
   const handleTextUploadSubmit = async (uploadParams) => {
@@ -326,18 +351,20 @@ function App() {
        setIsLoading(true); clearError();
        try {
            const result = await apiService.uploadTextDataset(textDatasetName, dataText, dataFormat);
-           handleDatasetUploaded(result, "text_upload");
+           handleDatasetCreation(result, "text_upload");
        } catch (error) {
            handleError(error, 'Text Upload failed');
        } finally {
            setIsLoading(false);
        }
    };
+
+   // Info/Stats Panel Handlers
    const handleFetchDatasetInfo = async () => {
-       if (!currentDataset) return handleError("Select a dataset first.");
+       if (!currentViewName) return handleError("Select a dataset to view its info.");
        setIsLoading(true); clearError(); setShowColumnStatsPanel(false);
        try {
-           const info = await apiService.getDatasetInfo(currentDataset);
+           const info = await apiService.getDatasetInfo(currentViewName);
            setDatasetInfo(info);
            setShowInfoPanel(true);
        } catch (err) {
@@ -348,11 +375,11 @@ function App() {
        }
    };
    const handleFetchColumnStats = async (columnName) => {
-        if (!currentDataset || !columnName) return;
+        if (!currentViewName || !columnName) return;
         setSelectedColumnForStats(columnName);
         setIsLoading(true); clearError(); setShowInfoPanel(false);
         try {
-            const stats = await apiService.getColumnStats(currentDataset, columnName, engine);
+            const stats = await apiService.getColumnStats(currentViewName, columnName);
             setColumnStats(stats);
             setShowColumnStatsPanel(true);
         } catch (err) {
@@ -365,23 +392,15 @@ function App() {
     };
   const handleCloseInfoPanel = () => { setShowInfoPanel(false); setDatasetInfo(null); };
   const handleCloseColumnStatsPanel = () => { setShowColumnStatsPanel(false); setColumnStats(null); setSelectedColumnForStats(null); };
-  const handleToggleRaPanel = () => setShowRaPanel(prev => !prev);
-  const handleRelationalOperation = async (operation, params, newDatasetName) => {
-       if (!newDatasetName) return handleError("Please provide a name for the new dataset.");
-       setIsLoading(true); clearError();
-       try {
-           const result = await apiService.performRelationalOperation(operation, params, newDatasetName);
-           fetchDatasetsList(); // Refresh list
-           alert(`Relational operation '${operation}' successful. Result saved as '${result.dataset_name}'. Select it from the dropdown to view.`);
-           setShowRaPanel(false);
-       } catch (err) {
-           handleError(err, `Relational Algebra operation '${operation}' failed.`);
-       } finally {
-           setIsLoading(false);
-       }
-   };
 
-  // --- NEW Handler for Rename ---
+  // RA Handlers
+  const handleToggleRaPanel = () => setShowRaPanel(prev => !prev);
+  const handleRaDatasetSaved = (saveResult) => {
+      console.log("RA Dataset Saved:", saveResult);
+      handleDatasetCreation(saveResult, "save_ra");
+  };
+
+  // Rename/Delete Handlers
   const handleRenameRequest = (oldName) => {
     if (!oldName) return;
     const newName = prompt(`Enter new name for dataset "${oldName}":`);
@@ -400,12 +419,9 @@ function App() {
     setIsLoading(true); clearError();
     try {
         const result = await apiService.renameDataset(oldName, newName);
-        setAvailableDatasets(result.datasets || []); // Update list from backend result
-        if (currentDataset === oldName) {
-           // Important: Update currentDataset state *without* triggering immediate load yet
-           // The useEffect watching availableDatasets will handle the load correctly
-           // when the list updates AND the name changes.
-           setCurrentDataset(newName);
+        setAvailableDatasets(result.datasets || []);
+        if (currentViewName === oldName) {
+           setCurrentViewName(newName);
         }
         alert(result.message || `Renamed ${oldName} to ${newName}`);
     } catch (err) {
@@ -415,7 +431,6 @@ function App() {
     }
 };
 
-  // --- (Optional) NEW Handler for Delete ---
     const handleDeleteRequest = (datasetNameToDelete) => {
         if (!datasetNameToDelete) return;
         if (window.confirm(`Are you sure you want to permanently delete the dataset "${datasetNameToDelete}"? This action cannot be undone.`)) {
@@ -427,10 +442,9 @@ function App() {
       setIsLoading(true); clearError();
       try {
           const result = await apiService.deleteDataset(datasetName);
-          // Optimistic update? Or wait for backend list? Backend list is safer.
           setAvailableDatasets(result.datasets || []);
-          if (currentDataset === datasetName) {
-              setCurrentDataset(null); // Deselect if current dataset is deleted
+          if (currentViewName === datasetName) {
+              setCurrentViewName(null);
           }
           alert(result.message || `Deleted ${datasetName}`);
       } catch (err) {
@@ -440,53 +454,32 @@ function App() {
       }
   };
 
-    const handleRaDatasetSaved = (saveResult) => {
-      console.log("RA Dataset Saved:", saveResult);
-      setAvailableDatasets(saveResult.datasets || []); // Update list immediately from save response
-      // Optionally, switch view to the newly saved dataset
-      // setCurrentDataset(saveResult.dataset_name);
-      // updateStateFromResult({ // Update preview based on save result
-      //      data: saveResult.preview || [],
-      //      columns: saveResult.columns || [],
-      //      row_count: saveResult.row_count || 0,
-      //      can_undo: false, // New dataset has no history
-      //      can_reset: false,
-      //      last_code: '',
-      // }, "save_ra");
-      setShowRaPanel(false); // Optionally close panel after save
- };
-
 
   // --- Render ---
   return (
     <Router>
       <div className="min-h-screen bg-maid-cream-light flex flex-col">
-        {/* Loading Overlay (Keep existing) */}
-         {isLoading && ( /* ... overlay div ... */
+         {isLoading && (
             <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
                <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-coffee"></div>
                <span className="ml-4 text-white text-xl font-medium">Loading...</span>
             </div>
          )}
 
-        {/* Pass rename/delete handlers down ONLY IF NEEDED IN NAVBAR (unlikely) */}
-        {/* Typically these belong on the management page */}
         <NavBar
           availableDatasets={availableDatasets}
-          currentDataset={currentDataset}
+          currentDataset={currentViewName}
           currentEngine={engine}
-          onDatasetUploaded={handleDatasetUploaded}
+          onDatasetUploaded={(result) => handleDatasetCreation(result, "upload")}
           onEngineChange={handleEngineChange}
           onDatasetChange={handleDatasetChange}
           onExport={handleExport}
           onUploadText={handleOpenTextModal}
           onUploadDbFile={handleDbFileUpload}
           isLoading={isLoading}
-          // Removed rename/delete handlers from NavBar props
         />
 
-         {/* Error Display (keep existing) */}
-         {error && ( /* ... error div ... */
+         {error && (
             <div className="m-4 p-3 bg-red-100 text-red-700 rounded-md border border-red-200 flex justify-between items-center">
                <span>Error: {error}</span>
                <button onClick={clearError} className="ml-4 font-bold text-red-800 hover:text-red-900">✕</button>
@@ -494,35 +487,29 @@ function App() {
          )}
 
         <Routes>
-           {/* Route for the main application */}
            <Route path="/" element={
              <MainAppContent
-               // Pass all necessary state and handlers for the main view
-               currentDataset={currentDataset}
+               currentViewName={currentViewName}
                engine={engine}
-               columns={columns}
-               data={data}
-               rowCount={rowCount}
+               columns={viewColumns} // Pass viewColumns
+               data={viewData}
+               rowCount={viewRowCount}
                isLoading={isLoading}
-               error={error} // Pass error state if needed inside main content specifically
-               clearError={clearError}
-               canUndo={canUndo}
-               canReset={canReset}
-               lastCode={lastCode}
-               currentEditorCode={currentEditorCode}
-               setCurrentEditorCode={setCurrentEditorCode}
+               canUndo={viewCanUndo}
+               canReset={viewCanReset}
+               lastExecutedCode={lastExecutedCode}
                availableDatasets={availableDatasets}
                showRaPanel={showRaPanel}
-               handleOperationSubmit={handleOperationSubmit}
+               // Pass handlers
+               handleOperationSubmit={handleOperationSubmit} // <-- Pass operation handler
                handleExecuteCode={handleExecuteCode}
                handleUndo={handleUndo}
                handleReset={handleReset}
-               handleSaveTransform={handleSaveTransform}
                handleFetchDatasetInfo={handleFetchDatasetInfo}
                handleToggleRaPanel={handleToggleRaPanel}
                handleFetchColumnStats={handleFetchColumnStats}
-               handleRaDatasetSaved={handleRaDatasetSaved} // Pass the new handler
-               handleError={handleError} // Pass error handler to RA panel
+               handleRaDatasetSaved={handleRaDatasetSaved}
+               handleError={handleError}
                // Panels state
                showInfoPanel={showInfoPanel}
                datasetInfo={datasetInfo}
@@ -533,7 +520,6 @@ function App() {
              />
            }/>
 
-           {/* Route for the Dataset Manager */}
            <Route path="/manage-datasets" element={
              <DatasetManagerPage
                datasets={availableDatasets}
@@ -544,18 +530,16 @@ function App() {
            }/>
         </Routes>
 
-      {/* Modals (remain the same) */}
-      {/* ... (TextUploadModal, DB Import Modal) ... */}
+      {/* Modals */}
       <TextUploadModal
         isOpen={showTextModal}
         onClose={handleCloseTextModal}
         onSubmit={handleTextUploadSubmit}
         isLoading={isLoading}
-        currentDatasetName={currentDataset}
+        currentDatasetName={currentViewName}
       />
        {showDbModal && tempDbId && (
-        <div className="modal-overlay">
-            {/* ... (modal content remains the same) ... */}
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40">
           <div className="modal-content bg-white rounded-lg shadow-xl p-6 max-w-md w-full">
             <h3 className="modal-header text-xl font-semibold text-maid-choco mb-4">Import Table from Database</h3>
             <form onSubmit={(e) => {
@@ -566,8 +550,8 @@ function App() {
               handleImportTable(tableName, newDatasetName);
             }}>
               <div className="mb-4">
-                <label htmlFor="db-table-select" className="input-label">Select Table:</label>
-                <select id="db-table-select" name="tableName" className="select-base" required disabled={isLoading || dbTables.length === 0}>
+                <label htmlFor="db-table-select" className="input-label block text-sm font-medium text-maid-choco mb-1">Select Table:</label>
+                <select id="db-table-select" name="tableName" className="select-base w-full p-2 border border-maid-gray rounded-md focus:ring-coffee-light focus:border-coffee-light" required disabled={isLoading || dbTables.length === 0}>
                   <option value="">Choose a table...</option>
                   {dbTables.map(table => (
                     <option key={table} value={table}>{table}</option>
@@ -577,12 +561,12 @@ function App() {
               </div>
 
               <div className="mb-4">
-                <label htmlFor="db-new-name-input" className="input-label">Dataset Name:</label>
+                <label htmlFor="db-new-name-input" className="input-label block text-sm font-medium text-maid-choco mb-1">Dataset Name:</label>
                 <input
                   type="text"
                   id="db-new-name-input"
                   name="newDatasetName"
-                  className="input-base"
+                  className="input-base w-full p-2 border border-maid-gray rounded-md focus:ring-coffee-light focus:border-coffee-light"
                   placeholder="Enter name for the imported dataset"
                   required
                   disabled={isLoading}
@@ -596,9 +580,9 @@ function App() {
                 </button>
               </div>
             </form>
-            <button onClick={() => setShowDbModal(false)} className="modal-close-button" aria-label="Close">
-              &times;
-            </button>
+             <button onClick={() => setShowDbModal(false)} className="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-2xl" aria-label="Close">
+               ×
+             </button>
             {error && <p className="mt-4 text-red-600 text-sm">Error: {error}</p>}
           </div>
         </div>
@@ -608,55 +592,58 @@ function App() {
   );
 }
 
+// --- MainAppContent Component ---
 function MainAppContent({
-  currentDataset, engine, columns, data, rowCount, isLoading, error, clearError,
-  canUndo, canReset, lastCode, currentEditorCode, setCurrentEditorCode, availableDatasets,
-  showRaPanel, handleOperationSubmit, handleExecuteCode, handleUndo, handleReset,
-  handleSaveTransform, handleFetchDatasetInfo, handleToggleRaPanel, handleFetchColumnStats,
-  handleRaDatasetSaved, handleError, // Added RA save handler and error handler
+  currentViewName, engine, columns, data, rowCount, isLoading,
+  canUndo, canReset, lastExecutedCode, availableDatasets,
+  showRaPanel,
+  handleOperationSubmit, // <-- Receive handler
+  handleExecuteCode, handleUndo, handleReset,
+  handleFetchDatasetInfo, handleToggleRaPanel, handleFetchColumnStats,
+  handleRaDatasetSaved, handleError,
   showInfoPanel, datasetInfo, handleCloseInfoPanel,
   showColumnStatsPanel, columnStats, handleCloseColumnStatsPanel
 }) {
 return (
    <main className="flex-grow p-4 max-w-full mx-auto w-full">
-       {/* Top Button Row (keep existing) */}
        <div className="mb-4 flex flex-wrap justify-start items-center gap-2">
-          {/* Add Link to Manage Datasets */}
           <Link to="/manage-datasets" className="btn btn-outline">
              Manage Datasets
           </Link>
-          {currentDataset && (
-             <>
-                 <button onClick={handleUndo} disabled={!canUndo || isLoading} className="btn btn-yellow">Undo Last</button>
-                 <button onClick={handleReset} disabled={!canReset || isLoading} className="btn btn-red">Reset</button>
-                 <button onClick={handleSaveTransform} disabled={isLoading} className="btn btn-green">Save State As...</button>
-             </>
-          )}
-          <button onClick={handleFetchDatasetInfo} disabled={!currentDataset || isLoading} className="btn btn-blue">Dataset Info</button>
+          <button onClick={handleUndo} disabled={!currentViewName || !canUndo || isLoading} className="btn btn-yellow">Undo Last Change</button>
+          <button onClick={handleReset} disabled={!currentViewName || !canReset || isLoading} className="btn btn-red">Reset History</button>
+          <button onClick={handleFetchDatasetInfo} disabled={!currentViewName || isLoading} className="btn btn-blue">Dataset Info</button>
           <button onClick={handleToggleRaPanel} className={`btn ${showRaPanel ? 'bg-coffee text-white' : 'btn-outline'}`}>
              {showRaPanel ? 'Hide' : 'Show'} Relational Algebra
           </button>
        </div>
 
-      {/* Main Grid (keep existing) */}
+      {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Left Panel: Operations */}
+        {/* Left Panel: Operations Panel and RA Panel */}
         <div className="lg:col-span-1 space-y-4">
+           {/* --- Add Operations Panel Back --- */}
            <EnhancedOperationsPanel
-              columns={columns}
-              onOperationSubmit={handleOperationSubmit}
-              availableDatasets={availableDatasets.filter(ds => ds !== currentDataset)}
-              currentDataset={currentDataset}
-              isLoading={isLoading}
-           />
+                columns={columns || []} // Pass current view columns
+                onOperationSubmit={handleOperationSubmit} // Pass the handler
+                availableDatasets={availableDatasets} // Pass for merge target selection
+                currentDataset={currentViewName} // Pass current view name
+                isLoading={isLoading} // Pass loading state
+            />
            {showRaPanel && (
               <RelationalAlgebraPanel
                   availableDatasets={availableDatasets}
-                  onDatasetSaved={handleRaDatasetSaved} // Pass save handler
+                  onDatasetSaved={handleRaDatasetSaved}
                   isLoading={isLoading}
-                  onError={handleError} // Pass error handler
+                  onError={handleError}
               />
-           )}
+            )}
+            {!showRaPanel && (
+                <div className="card p-4 bg-white rounded-lg border border-maid-gray-light shadow-soft flex flex-col items-center justify-center h-48">
+                    <div className="text-maid-choco-dark text-center mb-2">Relational Algebra</div>
+                    <div className="text-maid-gray-dark text-sm">Click button above to show RA panel ♡</div>
+                </div>
+            )}
         </div>
 
         {/* Right Area: Data Table, Code Display, Code Editor */}
@@ -668,21 +655,21 @@ return (
               isPreview={data.length < rowCount}
               onHeaderClick={handleFetchColumnStats}
               isLoading={isLoading}
+              datasetName={currentViewName}
            />
-           <CodeDisplay code={lastCode} engine={engine} />
+           <CodeDisplay code={lastExecutedCode} engine={engine} title="Last Action Code" />
            <CodeEditor
-              key={currentDataset + engine + lastCode}
-              currentDataset={currentDataset}
-              engine={engine}
-              initialCode={currentEditorCode}
-              onCodeExecuted={handleExecuteCode}
-              isLoading={isLoading}
-              onCodeChange={(code) => setCurrentEditorCode(code)}
+             key={currentViewName + engine}
+             currentDataset={currentViewName}
+             engine={engine}
+             initialCode={""}
+             onExecute={handleExecuteCode}
+             isLoading={isLoading}
            />
         </div>
       </div>
 
-      {/* Panels (keep existing) */}
+      {/* Panels */}
        {showInfoPanel && datasetInfo && (
           <DatasetInfoPanel info={datasetInfo} onClose={handleCloseInfoPanel} onColumnSelect={handleFetchColumnStats} />
        )}
